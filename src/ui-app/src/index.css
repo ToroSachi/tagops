@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply m-0 p-0 antialiased overflow-x-hidden;
+    background-color: #030712; /* Tailwind gray-950 */
+  }
+}
+
+@layer components {
+  /* Premium Glassmorphism Container */
+  .glass-panel {
+    @apply bg-[#0f172a80]; /* Slate-900 at 50% opacity */
+    @apply backdrop-blur-2xl;
+    @apply border border-white/[0.05];
+    box-shadow:
+      0 4px 24px -1px rgba(0, 0, 0, 0.5),
+      inset 0 1px 1px rgba(255, 255, 255, 0.05);
+  }
+
+  .app-bg {
+    background:
+      radial-gradient(circle at 10% 20%, rgba(30, 27, 75, 0.2) 0%, transparent 40%),
+      radial-gradient(circle at 90% 80%, rgba(70, 29, 124, 0.15) 0%, transparent 40%),
+      linear-gradient(to bottom right, #020617, #0f172a);
+    background-attachment: fixed;
+  }
+}
+
+/* Animations */
+@keyframes shimmer {
+  100% {
+    transform: translateX(300%) skewX(-12deg);
+  }
+}

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# User-specific config (contains account IDs)
+.gtmrc.json
+
+# Generated output files
+gtm-snapshot.json
+gtm-dictionary.md
+gtm-graph.md
+CHANGELOG-generated.md
+
+# Backups
+backups/

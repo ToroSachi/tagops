@@ -1,0 +1,107 @@
+{
+  "name": "tagops",
+  "version": "4.0.0",
+  "description": "Opinionated Google Tag Manager operations toolkit — audit, diff, sync, validate, and publish GTM workspaces from the CLI.",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "bin": {
+    "tagops": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "gtmrc.schema.json",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "gtm",
+    "google-tag-manager",
+    "cli",
+    "automation",
+    "tracking",
+    "pixels",
+    "infrastructure-as-code",
+    "iac",
+    "mcp",
+    "lint",
+    "audit",
+    "analytics",
+    "tag-management",
+    "consent-mode-v2",
+    "compliance",
+    "server-side-tagging",
+    "capi",
+    "data-layer",
+    "e2e-testing",
+    "mcp-server"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gtm-auto/gtm-auto.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gtm-auto/gtm-auto/issues"
+  },
+  "homepage": "https://github.com/gtm-auto/gtm-auto#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "server": "tsx src/server.ts",
+    "clean": "node ./scripts/clean-dist.mjs",
+    "build": "npm run clean && tsc -p tsconfig.build.json && npm run build:ui && node ./scripts/prune-dist.mjs",
+    "build:ui": "cd src/ui-app && npm run build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint 'src/**/*.ts'",
+    "format": "prettier --write .",
+    "prepare": "husky",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build",
+    "audit:gtm": "tsx src/cli.ts audit",
+    "backup": "tsx src/cli.ts backup"
+  },
+  "dependencies": {
+    "@googleapis/tagmanager": "^14.1.0",
+    "@inquirer/prompts": "^8.3.2",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ajv": "^8.18.0",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "google-auth-library": "^10.6.2",
+    "open": "^11.0.0",
+    "puppeteer": "^24.39.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.30.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.13.0",
+    "@types/open": "^6.1.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml}": [
+      "prettier --write"
+    ]
+  }
+}

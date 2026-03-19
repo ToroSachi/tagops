@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "1.0",
+  "meta": {
+    "timestamp": "2026-03-19T06:47:48.396Z",
+    "accountId": "6309802551",
+    "containerId": "228187044",
+    "workspaceId": "45",
+    "description": "Auto-generated manual snapshot"
+  },
+  "tags": [
+    {
+      "tagId": "1",
+      "name": "GA4 - Pageview",
+      "type": "gaawc",
+      "fingerprint": "fp1",
+      "firingTriggerId": ["100"]
+    }
+  ],
+  "triggers": [
+    {
+      "triggerId": "100",
+      "name": "All Pages",
+      "type": "PAGEVIEW",
+      "fingerprint": "fp2"
+    }
+  ],
+  "variables": [
+    {
+      "variableId": "200",
+      "name": "GA4 ID",
+      "type": "c",
+      "fingerprint": "fp3",
+      "parameter": [
+        {
+          "type": "template",
+          "key": "value",
+          "value": "G-123"
+        }
+      ]
+    }
+  ]
+}
