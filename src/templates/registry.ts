@@ -12,7 +12,12 @@
 
 import chalk from "chalk";
 import { createTag, createTrigger, createVariable, buildHtmlTagConfig } from "../lib/gtm-cli.js";
-import { TRIGGER_MAP, VARIABLE_MAP } from "../lib/architecture.js";
+import {
+  ALL_PAGES_TRIGGER_ID,
+  TRIGGER_MAP,
+  VARIABLE_MAP,
+  discoverTriggerByEvent,
+} from "../lib/architecture.js";
 
 // ── Template types ──
 
@@ -77,6 +82,14 @@ export interface InstallOptions {
   dryRun: boolean;
   pixelId?: string;
   measurementId?: string;
+}
+
+function getTriggerDisplayName(triggerEvent: string): string {
+  if (triggerEvent === "all_pages") {
+    return "All Pages";
+  }
+
+  return TRIGGER_MAP[triggerEvent]?.name ?? triggerEvent;
 }
 
 // ── Template definitions ──
@@ -169,21 +182,21 @@ function getTemplates(): IntegrationTemplate[] {
       variables: [
         {
           name: "JS - Get GCLID",
-          type: "j",
+          type: "jsm",
           config: {
             value: "function() { return localStorage.getItem('gclid'); }",
           },
         },
         {
           name: "JS - Get WBRAID",
-          type: "j",
+          type: "jsm",
           config: {
             value: "function() { return localStorage.getItem('wbraid'); }",
           },
         },
         {
           name: "JS - Get GBRAID",
-          type: "j",
+          type: "jsm",
           config: {
             value: "function() { return localStorage.getItem('gbraid'); }",
           },
@@ -1142,24 +1155,38 @@ export async function installTemplate(
   // Install tags
   const templateTags = template.tags(inputs);
   for (const tag of templateTags) {
-    // Resolve trigger
-    const triggerEntry = TRIGGER_MAP[tag.triggerEvent];
-    const triggerId = triggerEntry?.id ?? "83"; // Default to page_view
+    const triggerName = getTriggerDisplayName(tag.triggerEvent);
+    const triggerId = options.dryRun
+      ? null
+      : tag.triggerEvent === "all_pages"
+        ? ALL_PAGES_TRIGGER_ID
+        : await discoverTriggerByEvent(tag.triggerEvent);
 
     if (options.dryRun) {
       actions.push({
         type: "tag",
         name: tag.name,
         action: "dry_run",
-        detail: `trigger: ${triggerEntry?.name ?? tag.triggerEvent}`,
+        detail: `trigger: ${triggerName}`,
       });
       tagCount++;
     } else {
+      if (!triggerId) {
+        actions.push({
+          type: "tag",
+          name: tag.name,
+          action: "failed",
+          detail: `missing trigger: ${triggerName}`,
+        });
+        failedCount++;
+        continue;
+      }
+
       if (tag.type === "html" && tag.html) {
         const config = buildHtmlTagConfig(tag.html, tag.consentType);
         // Smart firing option: page-level tags → oncePerLoad, conversion tags → oncePerEvent
         const isPageLevel = tag.triggerEvent === "page_view" || tag.triggerEvent === "all_pages";
-        config.firingOption = isPageLevel ? "oncePerLoad" : "oncePerEvent";
+        config.tagFiringOption = isPageLevel ? "oncePerLoad" : "oncePerEvent";
 
         const result = await createTag({
           name: tag.name,

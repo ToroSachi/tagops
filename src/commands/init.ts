@@ -7,16 +7,16 @@ export function registerInitCommand(program: Command) {
     .description("Initialize a .gtmrc.json config file for your GTM container")
     .option("--account-id <id>", "GTM Account ID")
     .option("--container-id <id>", "GTM Container ID")
-    .option("--workspace-id <id>", "GTM Workspace ID", "37")
-    .action(async (opts: { accountId?: string; containerId?: string; workspaceId: string }) => {
+    .option("--workspace-id <id>", "GTM Workspace ID")
+    .action(async (opts: { accountId?: string; containerId?: string; workspaceId?: string }) => {
       const { writeConfig } = await import("../lib/config.js");
       const config = {
         accountId: opts.accountId ?? "",
         containerId: opts.containerId ?? "",
-        workspaceId: opts.workspaceId,
+        workspaceId: opts.workspaceId ?? "",
       };
 
-      if (!config.accountId || !config.containerId) {
+      if (!config.accountId || !config.containerId || !config.workspaceId) {
         console.log(chalk.bold("\n  GTM Auto — Init\n"));
         console.log("  Create a .gtmrc.json config file for your container.\n");
         console.log("  Find your IDs by running:");
@@ -24,7 +24,9 @@ export function registerInitCommand(program: Command) {
         console.log(chalk.cyan("    gtm containers list --account-id <ACCOUNT_ID>"));
         console.log(chalk.cyan("    gtm workspaces list\n"));
         console.log("  Then run:");
-        console.log(chalk.cyan("    tagops init --account-id <ID> --container-id <ID>\n"));
+        console.log(
+          chalk.cyan("    tagops init --account-id <ID> --container-id <ID> --workspace-id <ID>\n"),
+        );
         return;
       }
 

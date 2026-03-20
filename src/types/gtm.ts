@@ -8,7 +8,17 @@
 // ── Parameter types ──
 
 export interface GtmParameter {
-  type: "template" | "boolean" | "integer" | "list" | "map" | "TEMPLATE" | "BOOLEAN" | "INTEGER";
+  type:
+    | "template"
+    | "boolean"
+    | "integer"
+    | "list"
+    | "map"
+    | "trigger_reference"
+    | "tag_reference"
+    | "TEMPLATE"
+    | "BOOLEAN"
+    | "INTEGER";
   key?: string;
   value?: string;
   list?: GtmParameter[];
@@ -83,6 +93,97 @@ export interface GtmVariable {
   fingerprint?: string;
   parentFolderId?: string;
   notes?: string;
+}
+
+// ── Folder ──
+
+export interface GtmFolder {
+  folderId: string;
+  name: string;
+  notes?: string;
+  path: string;
+  fingerprint: string;
+  accountId?: string;
+  containerId?: string;
+  workspaceId?: string;
+}
+
+// ── Built-In Variable ──
+
+export interface GtmBuiltInVariable {
+  name: string;
+  type: string;
+  path: string;
+  accountId?: string;
+  containerId?: string;
+  workspaceId?: string;
+}
+
+// ── Custom Template ──
+
+export interface GtmGalleryReference {
+  galleryTemplateId?: string;
+  host?: string;
+  isModified?: boolean;
+  owner?: string;
+  repository?: string;
+  signature?: string;
+  templateDeveloperId?: string;
+  version?: string;
+}
+
+export interface GtmCustomTemplate {
+  templateId: string;
+  name: string;
+  templateData: string;
+  galleryReference?: GtmGalleryReference;
+  fingerprint: string;
+  path: string;
+}
+
+// ── Zone ──
+
+export interface GtmZoneChildContainer {
+  nickname?: string;
+  publicId?: string;
+}
+
+export interface GtmZoneTypeRestriction {
+  enable?: boolean;
+  whitelistedTypeId?: string[];
+}
+
+export interface GtmCondition {
+  type: string;
+  parameter?: GtmParameter[];
+}
+
+export interface GtmZoneBoundary {
+  condition?: GtmCondition[];
+  customEvaluationTriggerId?: string[];
+}
+
+export interface GtmZone {
+  zoneId: string;
+  name: string;
+  childContainer?: GtmZoneChildContainer[];
+  typeRestriction?: GtmZoneTypeRestriction;
+  boundary?: GtmZoneBoundary;
+  notes?: string;
+  fingerprint: string;
+  path: string;
+}
+
+// ── Environment ──
+
+export interface GtmEnvironment {
+  environmentId: string;
+  name: string;
+  description?: string;
+  type: string;
+  url?: string;
+  fingerprint: string;
+  path: string;
 }
 
 // ── Audit types ──

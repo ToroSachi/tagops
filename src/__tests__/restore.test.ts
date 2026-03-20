@@ -5,6 +5,10 @@ import { restoreWorkspace } from "../tools/restore.js";
 import * as gtmCli from "../lib/gtm-cli.js";
 
 vi.mock("../lib/gtm-cli.js", () => ({
+  buildCompleteTagConfig: vi.fn((tag: object, overrides: Record<string, unknown> = {}) => ({
+    ...(structuredClone(tag) as Record<string, unknown>),
+    ...overrides,
+  })),
   listTags: vi.fn(),
   listTriggers: vi.fn(),
   listVariables: vi.fn(),

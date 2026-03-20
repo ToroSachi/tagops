@@ -17,6 +17,9 @@ export function registerIaCCommands(program: Command) {
               tags: result.tagCount,
               triggers: result.triggerCount,
               variables: result.variableCount,
+              folders: result.folderCount,
+              builtInVariables: result.builtInVariableCount,
+              environments: result.environmentCount,
             }),
           );
         } else {
@@ -131,13 +134,13 @@ export function registerIaCCommands(program: Command) {
     .command("restore <file>")
     .description("Restore workspace from a snapshot file")
     .option("--dry-run", "Preview what would change without making modifications")
-    .option("--no-delete", "Don't delete resources that aren't in the snapshot")
+    .option("--delete", "Delete resources that aren't in the snapshot")
     .action(async (file: string, opts: { dryRun?: boolean; delete?: boolean }) => {
       const { restoreWorkspace, printRestoreResult } = await import("../tools/restore.js");
       try {
         const result = await restoreWorkspace(file, {
           dryRun: opts.dryRun ?? false,
-          allowDelete: opts.delete !== false,
+          allowDelete: opts.delete ?? false,
         });
         if (program.opts().json) {
           console.log(JSON.stringify(result, null, 2));

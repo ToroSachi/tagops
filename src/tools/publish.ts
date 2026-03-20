@@ -12,6 +12,7 @@
 
 import chalk from "chalk";
 import { createVersion, publishVersion, listVersions } from "../lib/gtm-cli.js";
+import type { GtmSyncStatus } from "../lib/gtm-cli.js";
 
 export interface VersionInfo {
   containerVersionId: string;
@@ -27,9 +28,32 @@ export interface PublishResult {
   versionId?: string;
   published: boolean;
   error?: string;
+  compilerError?: boolean | null;
+  syncStatus?: GtmSyncStatus;
 }
 
 // Now imported directly from gtm-cli.ts
+
+function getVersionCreationIssues(version: {
+  compilerError?: boolean | null;
+  syncStatus?: GtmSyncStatus;
+}): string[] {
+  const issues: string[] = [];
+
+  if (version.compilerError) {
+    issues.push("GTM reported compiler errors");
+  }
+
+  if (version.syncStatus?.mergeConflict) {
+    issues.push("workspace sync reported merge conflicts");
+  }
+
+  if (version.syncStatus?.syncError) {
+    issues.push("workspace sync reported an error");
+  }
+
+  return issues;
+}
 
 /**
  * Full publish workflow with safety rails.
@@ -64,6 +88,14 @@ export async function runPublish(opts: {
       return result;
     }
     result.versionId = version.containerVersionId;
+    result.compilerError = version.compilerError;
+    result.syncStatus = version.syncStatus;
+
+    const creationIssues = getVersionCreationIssues(version);
+    if (creationIssues.length > 0) {
+      result.error = `Version creation is not publish-safe: ${creationIssues.join("; ")}`;
+      return result;
+    }
   } catch (err) {
     result.error = `Failed to create version: ${(err as Error).message}`;
     return result;
@@ -99,7 +131,11 @@ export function printPublishResult(result: PublishResult): void {
   }
 
   if (result.error) {
-    console.log(chalk.red(`  ✖ ${result.error}\n`));
+    console.log(chalk.red(`  ✖ ${result.error}`));
+    if (result.versionId) {
+      console.log(`    Version ID: ${result.versionId}`);
+    }
+    console.log();
     return;
   }
 

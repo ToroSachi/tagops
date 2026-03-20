@@ -10,6 +10,7 @@ import chalk from "chalk";
 import { type GtmTag, type GtmTrigger, type GtmVariable } from "../types/gtm.js";
 import { loadConfig } from "../lib/config.js";
 import {
+  buildCompleteTagConfig,
   createVariable,
   updateVariable,
   createTrigger,
@@ -85,16 +86,55 @@ async function fetchFullState(profileName: string): Promise<{
   const gtm = await getGtmClient();
   const parent = `accounts/${config.accountId}/containers/${config.containerId}/workspaces/${config.workspaceId}`;
 
-  const [tagsRes, triggersRes, variablesRes] = await Promise.all([
-    gtm.accounts.containers.workspaces.tags.list({ parent }),
-    gtm.accounts.containers.workspaces.triggers.list({ parent }),
-    gtm.accounts.containers.workspaces.variables.list({ parent }),
+  const listTags = async (): Promise<SyncTag[]> => {
+    const tags: SyncTag[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await gtm.accounts.containers.workspaces.tags.list({ parent, pageToken });
+      tags.push(...((res.data.tag as SyncTag[]) || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return tags;
+  };
+
+  const listTriggers = async (): Promise<SyncTrigger[]> => {
+    const triggers: SyncTrigger[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await gtm.accounts.containers.workspaces.triggers.list({ parent, pageToken });
+      triggers.push(...((res.data.trigger as SyncTrigger[]) || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return triggers;
+  };
+
+  const listVariables = async (): Promise<SyncVariable[]> => {
+    const variables: SyncVariable[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await gtm.accounts.containers.workspaces.variables.list({ parent, pageToken });
+      variables.push(...((res.data.variable as SyncVariable[]) || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return variables;
+  };
+
+  const [tags, triggers, variables] = await Promise.all([
+    listTags(),
+    listTriggers(),
+    listVariables(),
   ]);
 
   return {
-    tags: (tagsRes.data.tag as SyncTag[]) || [],
-    triggers: (triggersRes.data.trigger as SyncTrigger[]) || [],
-    variables: (variablesRes.data.variable as SyncVariable[]) || [],
+    tags,
+    triggers,
+    variables,
   };
 }
 
@@ -184,18 +224,16 @@ function buildTriggerRequestBody(
 
 function buildTagRequestBody(
   tag: SyncTag,
+  firingTriggerId: string[] | undefined,
   blockingTriggerId: string[] | undefined,
   targetTag?: SyncTag,
 ): Record<string, unknown> {
-  return {
-    parameter: tag.parameter,
-    consentSettings: tag.consentSettings,
-    paused: tag.paused,
-    parentFolderId: tag.parentFolderId,
-    tagFiringOption: tag.tagFiringOption,
+  return buildCompleteTagConfig(tag, {
+    firingTriggerId,
     blockingTriggerId,
+    parentFolderId: tag.parentFolderId,
     notes: getNotes(tag.notes, targetTag?.notes),
-  };
+  });
 }
 
 export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
@@ -390,7 +428,7 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
 
       const firingTriggerId = mapIds(sourceTag.firingTriggerId);
       const blockingTriggerId = mapIds(sourceTag.blockingTriggerId);
-      const config = buildTagRequestBody(sourceTag, blockingTriggerId, targetTag);
+      const config = buildTagRequestBody(sourceTag, firingTriggerId, blockingTriggerId, targetTag);
 
       if (diff.status === "only_in_source") {
         await createTag({

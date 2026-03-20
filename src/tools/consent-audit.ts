@@ -19,7 +19,7 @@
  */
 
 import chalk from "chalk";
-import { listTags, updateTag } from "../lib/gtm-cli.js";
+import { buildCompleteTagConfig, getTag, listTags, updateTag } from "../lib/gtm-cli.js";
 import {
   LIGHTWEIGHT_PIXEL_PATTERNS,
   AD_VENDOR_PATTERNS,
@@ -307,11 +307,20 @@ export async function fixConsentV2(
       fixed++;
     } else {
       try {
+        const fullTag = await getTag(tag.tagId);
+        if (!fullTag) {
+          actions.push(`Error fixing tag ${tag.tagId} (${tag.name}): tag no longer exists`);
+          errors++;
+          continue;
+        }
+
         await updateTag({
-          tagId: tag.tagId,
-          name: tag.name,
-          fingerprint: tag.fingerprint,
-          config: { consentSettings: newConsentSettings },
+          tagId: fullTag.tagId,
+          name: fullTag.name,
+          fingerprint: fullTag.fingerprint,
+          config: buildCompleteTagConfig(fullTag, {
+            consentSettings: newConsentSettings,
+          }),
         });
         actions.push(`Fixed tag ${tag.tagId} (${tag.name}): added ${requiredSignals.join(", ")}`);
         fixed++;

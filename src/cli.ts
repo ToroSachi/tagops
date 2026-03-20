@@ -23,6 +23,7 @@ import { registerDeployCommand } from "./commands/deploy.js";
 import { registerLegacyCommands } from "./commands/legacy.js";
 import { registerTemplateCommands } from "./commands/templates.js";
 import { registerProfileCommand } from "./commands/profiles.js";
+import { setDefaultProfileName } from "./lib/config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -38,6 +39,10 @@ program
   .option("--profile <name>", "Use a named profile from .gtmrc.json (for multi-container setups)");
 
 import { handleError } from "./lib/errors.js";
+
+program.hook("preAction", () => {
+  setDefaultProfileName(program.opts().profile);
+});
 
 // Register all command modules
 registerInitCommand(program);

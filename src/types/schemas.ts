@@ -3,7 +3,18 @@ import { z } from "zod";
 // ── Parameter Schema ──
 // z.ZodType<any> annotation is required to allow recursive list/map self-reference
 export const GtmParameterSchema: z.ZodType<any> = z.object({
-  type: z.enum(["template", "boolean", "integer", "list", "map", "TEMPLATE", "BOOLEAN", "INTEGER"]),
+  type: z.enum([
+    "template",
+    "boolean",
+    "integer",
+    "list",
+    "map",
+    "trigger_reference",
+    "tag_reference",
+    "TEMPLATE",
+    "BOOLEAN",
+    "INTEGER",
+  ]),
   key: z.string().optional(),
   value: z.any().optional(),
   list: z.array(z.lazy(() => GtmParameterSchema)).optional(),
@@ -66,6 +77,107 @@ export const GtmVariableSchema = z
   })
   .passthrough();
 
+export const GtmFolderSchema = z
+  .object({
+    folderId: z.string(),
+    name: z.string(),
+    notes: z.string().optional(),
+    path: z.string(),
+    fingerprint: z.string(),
+    accountId: z.string().optional(),
+    containerId: z.string().optional(),
+    workspaceId: z.string().optional(),
+  })
+  .passthrough();
+
+export const GtmBuiltInVariableSchema = z
+  .object({
+    name: z.string(),
+    type: z.string(),
+    path: z.string(),
+    accountId: z.string().optional(),
+    containerId: z.string().optional(),
+    workspaceId: z.string().optional(),
+  })
+  .passthrough();
+
+export const GtmGalleryReferenceSchema = z
+  .object({
+    galleryTemplateId: z.string().optional(),
+    host: z.string().optional(),
+    isModified: z.boolean().optional(),
+    owner: z.string().optional(),
+    repository: z.string().optional(),
+    signature: z.string().optional(),
+    templateDeveloperId: z.string().optional(),
+    version: z.string().optional(),
+  })
+  .passthrough();
+
+export const GtmCustomTemplateSchema = z
+  .object({
+    templateId: z.string(),
+    name: z.string(),
+    templateData: z.string(),
+    galleryReference: GtmGalleryReferenceSchema.optional(),
+    fingerprint: z.string(),
+    path: z.string(),
+  })
+  .passthrough();
+
+const GtmConditionSchema = z
+  .object({
+    type: z.string(),
+    parameter: z.array(GtmParameterSchema).optional(),
+  })
+  .passthrough();
+
+const GtmZoneChildContainerSchema = z
+  .object({
+    nickname: z.string().optional(),
+    publicId: z.string().optional(),
+  })
+  .passthrough();
+
+const GtmZoneTypeRestrictionSchema = z
+  .object({
+    enable: z.boolean().optional(),
+    whitelistedTypeId: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+const GtmZoneBoundarySchema = z
+  .object({
+    condition: z.array(GtmConditionSchema).optional(),
+    customEvaluationTriggerId: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+export const GtmZoneSchema = z
+  .object({
+    zoneId: z.string(),
+    name: z.string(),
+    childContainer: z.array(GtmZoneChildContainerSchema).optional(),
+    typeRestriction: GtmZoneTypeRestrictionSchema.optional(),
+    boundary: GtmZoneBoundarySchema.optional(),
+    notes: z.string().optional(),
+    fingerprint: z.string(),
+    path: z.string(),
+  })
+  .passthrough();
+
+export const GtmEnvironmentSchema = z
+  .object({
+    environmentId: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    type: z.string(),
+    url: z.string().optional(),
+    fingerprint: z.string(),
+    path: z.string(),
+  })
+  .passthrough();
+
 export const SnapshotSchema = z.object({
   schemaVersion: z.literal("1.0"),
   meta: z.object({
@@ -80,6 +192,11 @@ export const SnapshotSchema = z.object({
   tags: z.array(GtmTagSchema),
   triggers: z.array(GtmTriggerSchema),
   variables: z.array(GtmVariableSchema),
+  folders: z.array(GtmFolderSchema).optional(),
+  builtInVariables: z.array(GtmBuiltInVariableSchema).optional(),
+  customTemplates: z.array(GtmCustomTemplateSchema).optional(),
+  zones: z.array(GtmZoneSchema).optional(),
+  environments: z.array(GtmEnvironmentSchema).optional(),
 });
 
 export type SnapshotData = z.infer<typeof SnapshotSchema>;

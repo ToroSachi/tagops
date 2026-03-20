@@ -2,16 +2,17 @@
  * Restore — restore workspace from a snapshot file.
  *
  * Compares current state vs snapshot and creates/updates resources to match.
- * Supports --dry-run and --no-delete for safety.
+ * Supports --dry-run and optional --delete for safety.
  *
  * Usage:
- *   npx tsx src/cli.ts restore gtm-snapshot.json [--dry-run] [--no-delete]
+ *   npx tsx src/cli.ts restore gtm-snapshot.json [--dry-run] [--delete]
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import {
+  buildCompleteTagConfig,
   listTags,
   listTriggers,
   listVariables,
@@ -235,17 +236,12 @@ function updateTagConfig(
   const firingTriggerId = mapTriggerIds(tag.firingTriggerId, triggerIdMap);
   const blockingTriggerId = mapTriggerIds(tag.blockingTriggerId, triggerIdMap);
 
-  return {
-    type: tag.type,
-    parameter: tag.parameter ?? [],
-    consentSettings: tag.consentSettings,
-    paused: tag.paused,
-    tagFiringOption: tag.tagFiringOption,
+  return buildCompleteTagConfig(tag, {
     parentFolderId: tag.parentFolderId,
     notes: tag.notes ?? current?.notes,
-    ...(firingTriggerId?.length ? { firingTriggerId } : {}),
-    ...(blockingTriggerId?.length ? { blockingTriggerId } : {}),
-  };
+    firingTriggerId,
+    blockingTriggerId,
+  });
 }
 
 function createTriggerConfig(

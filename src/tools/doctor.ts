@@ -62,7 +62,8 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push({
       name: "Configuration (.gtmrc.json)",
       status: "fail",
-      detail: "No .gtmrc.json found. Run: tagops init --account-id <ID> --container-id <ID>",
+      detail:
+        "No .gtmrc.json found. Run: tagops init --account-id <ID> --container-id <ID> --workspace-id <ID>",
     });
   }
 

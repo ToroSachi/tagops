@@ -6,8 +6,7 @@
  */
 
 import chalk from "chalk";
-import { getTag, updateTag } from "../lib/gtm-cli.js";
-import { buildConsentConfig } from "../lib/gtm-cli.js";
+import { buildCompleteTagConfig, buildConsentConfig, getTag, updateTag } from "../lib/gtm-cli.js";
 import { isLightweightPixel } from "../lib/architecture.js";
 import { createPreFixBackup } from "../lib/pre-fix-backup.js";
 
@@ -58,21 +57,14 @@ export async function fixConsent(
       );
     }
 
-    const config: Record<string, unknown> = {
-      type: tag.type,
-      parameter: structuredClone(tag.parameter ?? []),
-      consentSettings: buildConsentConfig(consentType),
-    };
-
-    const firing = tag.firingTriggerId ?? [];
-
     try {
       await updateTag({
         tagId: id,
         name: tag.name,
         fingerprint: tag.fingerprint,
-        config,
-        firingTriggerId: firing,
+        config: buildCompleteTagConfig(tag, {
+          consentSettings: buildConsentConfig(consentType),
+        }),
       });
       results.push({ tagId: id, name: tag.name, success: true });
       console.log(`  ${chalk.green("✔")} Tag ${id} (${tag.name}) → consent: ${consentType}`);

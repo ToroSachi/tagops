@@ -66,10 +66,49 @@ async function fetchContainerResources(profileName: string): Promise<ContainerSn
   });
   const parent = `accounts/${config.accountId}/containers/${config.containerId}/workspaces/${config.workspaceId}`;
 
-  const [tagsRes, triggersRes, variablesRes] = await Promise.all([
-    gtm.accounts.containers.workspaces.tags.list({ parent }),
-    gtm.accounts.containers.workspaces.triggers.list({ parent }),
-    gtm.accounts.containers.workspaces.variables.list({ parent }),
+  const listTags = async (): Promise<GtmTag[]> => {
+    const tags: GtmTag[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await gtm.accounts.containers.workspaces.tags.list({ parent, pageToken });
+      tags.push(...((res.data.tag as GtmTag[]) || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return tags;
+  };
+
+  const listTriggers = async (): Promise<GtmTrigger[]> => {
+    const triggers: GtmTrigger[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await gtm.accounts.containers.workspaces.triggers.list({ parent, pageToken });
+      triggers.push(...((res.data.trigger as GtmTrigger[]) || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return triggers;
+  };
+
+  const listVariables = async (): Promise<GtmVariable[]> => {
+    const variables: GtmVariable[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await gtm.accounts.containers.workspaces.variables.list({ parent, pageToken });
+      variables.push(...((res.data.variable as GtmVariable[]) || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return variables;
+  };
+
+  const [tags, triggers, variables] = await Promise.all([
+    listTags(),
+    listTriggers(),
+    listVariables(),
   ]);
 
   return {
@@ -77,9 +116,9 @@ async function fetchContainerResources(profileName: string): Promise<ContainerSn
     accountId: config.accountId,
     containerId: config.containerId,
     workspaceId: config.workspaceId,
-    tags: (tagsRes.data.tag as GtmTag[]) || [],
-    triggers: (triggersRes.data.trigger as GtmTrigger[]) || [],
-    variables: (variablesRes.data.variable as GtmVariable[]) || [],
+    tags,
+    triggers,
+    variables,
   };
 }
 

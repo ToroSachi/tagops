@@ -6,7 +6,7 @@
  */
 
 import chalk from "chalk";
-import { getTag, updateTag } from "../lib/gtm-cli.js";
+import { buildCompleteTagConfig, getTag, updateTag } from "../lib/gtm-cli.js";
 
 export interface FixTriggersResult {
   tagId: string;
@@ -43,21 +43,18 @@ export async function fixTriggers(mapping: Record<string, string>): Promise<FixT
       continue;
     }
 
-    const config: Record<string, unknown> = {
-      type: tag.type,
-      parameter: structuredClone(tag.parameter ?? []),
-    };
-    if (tag.consentSettings) {
-      config.consentSettings = tag.consentSettings;
-    }
+    const firingTriggerId = triggerIds
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
 
     try {
       await updateTag({
         tagId,
         name: tag.name,
         fingerprint: tag.fingerprint,
-        config,
-        firingTriggerId: triggerIds,
+        config: buildCompleteTagConfig(tag, { firingTriggerId }),
+        firingTriggerId,
       });
       results.push({ tagId, name: tag.name, triggerId: triggerIds, success: true });
       console.log(`  ${chalk.green("✔")} Tag ${tagId} (${tag.name}) → trigger(s) ${triggerIds}`);

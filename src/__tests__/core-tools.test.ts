@@ -129,16 +129,16 @@ describe("Architecture Constants", () => {
     const coreEvents = ["page_view", "view_item", "add_to_cart", "begin_checkout", "purchase"];
     for (const event of coreEvents) {
       expect(TRIGGER_MAP[event]).toBeDefined();
-      expect(TRIGGER_MAP[event].id).toBeTruthy();
       expect(TRIGGER_MAP[event].name).toBeTruthy();
       expect(TRIGGER_MAP[event].event).toBeTruthy();
+      expect(TRIGGER_MAP[event].namePattern).toBeTruthy();
     }
   });
 
-  it("TRIGGER_MAP entries have unique IDs", async () => {
+  it("TRIGGER_MAP entries have unique custom event names", async () => {
     const { TRIGGER_MAP } = await import("../lib/architecture.js");
-    const ids = Object.values(TRIGGER_MAP).map((t) => t.id);
-    expect(new Set(ids).size).toBe(ids.length);
+    const events = Object.values(TRIGGER_MAP).map((trigger) => trigger.event);
+    expect(new Set(events).size).toBe(events.length);
   });
 
   it("VARIABLE_MAP has ecommerce core variables", async () => {

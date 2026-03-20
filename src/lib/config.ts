@@ -47,6 +47,8 @@ const GtmConfigSchema = z.object({
 
 export type GtmConfig = z.infer<typeof GtmConfigSchema>;
 
+let defaultProfileName: string | undefined;
+
 export class ConfigError extends Error {
   constructor(
     message: string,
@@ -66,6 +68,14 @@ export function normalizeProfileName(profileName?: string): string | undefined {
     return undefined;
   }
   return profileName;
+}
+
+/**
+ * Set the implicit profile used when callers omit `profileName`.
+ * Explicit `loadConfig(profileName)` calls always take precedence.
+ */
+export function setDefaultProfileName(profileName?: string): void {
+  defaultProfileName = normalizeProfileName(profileName);
 }
 
 /**
@@ -118,7 +128,9 @@ export function loadConfig(profileName?: string): GtmConfig {
     let config = result.data;
 
     // If --profile was specified, overlay the profile values
-    const requestedProfileName = normalizeProfileName(profileName);
+    const requestedProfileName = normalizeProfileName(
+      profileName === undefined ? defaultProfileName : profileName,
+    );
     if (requestedProfileName) {
       const profile = config.profiles?.find((p) => p.name === requestedProfileName);
       if (!profile) {
@@ -142,7 +154,9 @@ export function loadConfig(profileName?: string): GtmConfig {
   }
 
   // No config file found — tell the user how to create one
-  throw new Error("No .gtmrc.json found. Run: tagops init --account-id <ID> --container-id <ID>");
+  throw new Error(
+    "No .gtmrc.json found. Run: tagops init --account-id <ID> --container-id <ID> --workspace-id <ID>",
+  );
 }
 
 /**
@@ -156,7 +170,7 @@ export function listProfileConfigs(): Array<{
   ga4MeasurementId?: string;
   metaPixelId?: string;
 }> {
-  const config = loadConfig();
+  const config = loadConfig("default");
 
   return [
     {
@@ -182,7 +196,7 @@ export function listProfileConfigs(): Array<{
  * List all profile names in the current config.
  */
 export function listProfiles(): string[] {
-  const config = loadConfig();
+  const config = loadConfig("default");
   return config.profiles?.map((p) => p.name) ?? [];
 }
 

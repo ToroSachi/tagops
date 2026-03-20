@@ -11,7 +11,8 @@
  */
 
 import chalk from "chalk";
-import { listTags, updateTag, getTag, type UpdateTagInput } from "../lib/gtm-cli.js";
+import { buildCompleteTagConfig, listTags, updateTag, getTag } from "../lib/gtm-cli.js";
+import { discoverTriggerByEvent } from "../lib/architecture.js";
 import { createPreFixBackup } from "../lib/pre-fix-backup.js";
 import type { GtmTag } from "../types/gtm.js";
 
@@ -72,7 +73,10 @@ export function findUnlimitedFiringTags(tags: GtmTag[]): FiringAuditResult[] {
  * - Page-view / content / lead / view attribution pixels → oncePerLoad
  * - Conversion / checkout / purchase tags → oncePerEvent
  */
-function determineIdealFiringOption(tag: { name: string; triggers: string[] }): FiringOption {
+function determineIdealFiringOption(
+  tag: { name: string; triggers: string[] },
+  pageViewTriggerId?: string | null,
+): FiringOption {
   const nameLower = tag.name.toLowerCase();
 
   // Page-view and content attribution pixels should fire once per page load
@@ -90,8 +94,8 @@ function determineIdealFiringOption(tag: { name: string; triggers: string[] }): 
     return "oncePerLoad";
   }
 
-  // If firing on the page_view trigger (ID 83), it's likely a page-level pixel
-  if (tag.triggers.length === 1 && tag.triggers[0] === "83") {
+  // If firing on the workspace's page_view trigger, it's likely a page-level pixel
+  if (pageViewTriggerId && tag.triggers.length === 1 && tag.triggers[0] === pageViewTriggerId) {
     return "oncePerLoad";
   }
 
@@ -105,6 +109,7 @@ function determineIdealFiringOption(tag: { name: string; triggers: string[] }): 
  */
 export async function fixFiring(option?: FiringOption, dryRun = false): Promise<FixFiringResult> {
   const flagged = await scanUnlimitedFiring();
+  const pageViewTriggerId = option ? null : await discoverTriggerByEvent("page_view");
 
   let fixed = 0;
   let skipped = 0;
@@ -113,7 +118,7 @@ export async function fixFiring(option?: FiringOption, dryRun = false): Promise<
 
   for (const item of flagged) {
     // Use explicit override if provided, otherwise determine per-tag
-    const targetOption = option ?? determineIdealFiringOption(item);
+    const targetOption = option ?? determineIdealFiringOption(item, pageViewTriggerId);
 
     if (dryRun) {
       actions.push(
@@ -138,20 +143,9 @@ export async function fixFiring(option?: FiringOption, dryRun = false): Promise<
       }
 
       // Build the update — we need to send the full tag body
-      const config: Record<string, unknown> = {
-        ...fullTag,
+      const config = buildCompleteTagConfig(fullTag, {
         tagFiringOption: targetOption,
-      };
-
-      // Remove read-only fields
-      delete config.tagManagerUrl;
-      delete config.parentFolderId;
-      delete config.path;
-      delete config.accountId;
-      delete config.containerId;
-      delete config.workspaceId;
-      delete config.tagId;
-      delete config.fingerprint;
+      });
 
       await updateTag({
         tagId: item.tagId,

@@ -20,6 +20,10 @@ vi.mock("../lib/config.js", () => ({
 }));
 
 vi.mock("../lib/gtm-cli.js", () => ({
+  buildCompleteTagConfig: vi.fn((tag: object, overrides: Record<string, unknown> = {}) => ({
+    ...(structuredClone(tag) as Record<string, unknown>),
+    ...overrides,
+  })),
   createVariable,
   updateVariable,
   createTrigger,

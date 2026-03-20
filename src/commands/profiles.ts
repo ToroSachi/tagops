@@ -7,9 +7,10 @@ export function registerProfileCommand(program: Command) {
     .description("List available container profiles from .gtmrc.json")
     .action(async () => {
       const { listProfiles, loadConfig } = await import("../lib/config.js");
+      const globalProfile = program.opts().profile as string | undefined;
       const profiles = listProfiles();
       if (program.opts().json) {
-        const config = loadConfig();
+        const config = loadConfig(globalProfile);
         console.log(JSON.stringify(config.profiles ?? [], null, 2));
       } else if (profiles.length === 0) {
         console.log(chalk.yellow("\n  No profiles configured.\n"));

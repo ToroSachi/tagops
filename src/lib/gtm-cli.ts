@@ -11,9 +11,12 @@ import crypto from "node:crypto";
 import { getAuthClient } from "./auth.js";
 import { loadConfig, ConfigError } from "./config.js";
 import type {
+  GtmBuiltInVariable,
   GtmTag,
   GtmTrigger,
   GtmVariable,
+  GtmFolder,
+  GtmEnvironment,
   GtmConsentSettings,
   GtmParameter,
 } from "../types/gtm.js";
@@ -88,6 +91,12 @@ export function getWorkspacePath(): string {
   const config = loadConfig();
   return `accounts/${config.accountId}/containers/${config.containerId}/workspaces/${config.workspaceId}`;
 }
+
+export function getContainerPath(): string {
+  const config = loadConfig();
+  return `accounts/${config.accountId}/containers/${config.containerId}`;
+}
+
 async function handleApiError(err: unknown, operation: string): Promise<never> {
   if (
     err instanceof ConfigError ||
@@ -121,12 +130,24 @@ export async function listWorkspaces(): Promise<Array<{ workspaceId: string; nam
     const config = loadConfig();
     const parent = `accounts/${config.accountId}/containers/${config.containerId}`;
     const gtm = await getGtmClient();
-    const res = await withRetry(() => gtm.accounts.containers.workspaces.list({ parent }));
-    const workspaces = res.data.workspace || [];
-    return workspaces.map((w: any) => ({
-      workspaceId: w.workspaceId as string,
-      name: w.name as string,
-    }));
+    const workspaces: Array<{ workspaceId: string; name: string }> = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.containers.workspaces.list({ parent, pageToken }),
+      );
+      const page = res.data.workspace || [];
+      workspaces.push(
+        ...page.map((w: any) => ({
+          workspaceId: w.workspaceId as string,
+          name: w.name as string,
+        })),
+      );
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return workspaces;
   } catch (err) {
     return handleApiError(err, "listWorkspaces");
   }
@@ -278,6 +299,96 @@ export async function listVariables(): Promise<GtmVariable[]> {
   }
 }
 
+export async function listFolders(): Promise<GtmFolder[]> {
+  try {
+    const parent = getWorkspacePath();
+    const cacheKey = `folders:${parent}`;
+    const cached = getCached<GtmFolder[]>(cacheKey);
+    if (cached) return cached;
+
+    const gtm = await getGtmClient();
+    const allFolders: GtmFolder[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.containers.workspaces.folders.list({
+          parent,
+          pageToken,
+        }),
+      );
+      const folders = (res.data.folder as GtmFolder[]) || [];
+      allFolders.push(...folders);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    setCache(cacheKey, allFolders);
+    return allFolders;
+  } catch (err) {
+    return handleApiError(err, "listFolders");
+  }
+}
+
+export async function listBuiltInVariables(): Promise<GtmBuiltInVariable[]> {
+  try {
+    const parent = getWorkspacePath();
+    const cacheKey = `builtInVariables:${parent}`;
+    const cached = getCached<GtmBuiltInVariable[]>(cacheKey);
+    if (cached) return cached;
+
+    const gtm = await getGtmClient();
+    const allBuiltInVariables: GtmBuiltInVariable[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.containers.workspaces.built_in_variables.list({
+          parent,
+          pageToken,
+        }),
+      );
+      const builtInVariables = (res.data.builtInVariable as GtmBuiltInVariable[]) || [];
+      allBuiltInVariables.push(...builtInVariables);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    setCache(cacheKey, allBuiltInVariables);
+    return allBuiltInVariables;
+  } catch (err) {
+    return handleApiError(err, "listBuiltInVariables");
+  }
+}
+
+export async function listEnvironments(): Promise<GtmEnvironment[]> {
+  try {
+    const parent = getContainerPath();
+    const cacheKey = `environments:${parent}`;
+    const cached = getCached<GtmEnvironment[]>(cacheKey);
+    if (cached) return cached;
+
+    const gtm = await getGtmClient();
+    const allEnvironments: GtmEnvironment[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.containers.environments.list({
+          parent,
+          pageToken,
+        }),
+      );
+      const environments = (res.data.environment as GtmEnvironment[]) || [];
+      allEnvironments.push(...environments);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    setCache(cacheKey, allEnvironments);
+    return allEnvironments;
+  } catch (err) {
+    return handleApiError(err, "listEnvironments");
+  }
+}
+
 // ── Tag operations ──
 
 export interface CreateTagInput {
@@ -349,6 +460,42 @@ export interface UpdateTagInput {
   fingerprint: string;
   config: Record<string, unknown>;
   firingTriggerId?: string | string[];
+}
+
+const READ_ONLY_TAG_FIELDS = [
+  "accountId",
+  "containerId",
+  "workspaceId",
+  "path",
+  "tagId",
+  "fingerprint",
+  "tagManagerUrl",
+] as const;
+
+/**
+ * GTM tags.update fully replaces the tag resource, so callers must provide
+ * the complete tag body with only read-only API fields removed.
+ */
+export function buildCompleteTagConfig(
+  tag: object,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const requestBody = {
+    ...(structuredClone(tag) as Record<string, unknown>),
+    ...overrides,
+  };
+
+  for (const field of READ_ONLY_TAG_FIELDS) {
+    delete requestBody[field];
+  }
+
+  for (const [key, value] of Object.entries(requestBody)) {
+    if (value === undefined) {
+      delete requestBody[key];
+    }
+  }
+
+  return requestBody;
 }
 
 export async function updateTag(input: UpdateTagInput): Promise<string> {
@@ -629,14 +776,37 @@ export interface GtmVersionInfo {
   fingerprint?: string;
 }
 
+export interface GtmSyncStatus {
+  mergeConflict?: boolean | null;
+  syncError?: boolean | null;
+}
+
+export interface GtmCreateVersionResult extends Partial<GtmVersionInfo> {
+  compilerError?: boolean | null;
+  syncStatus?: GtmSyncStatus;
+}
+
 export async function listVersions(): Promise<GtmVersionInfo[]> {
   try {
     const config = loadConfig();
     const parent = `accounts/${config.accountId}/containers/${config.containerId}`;
     const gtm = await getGtmClient();
-    const res = await withRetry(() => gtm.accounts.containers.version_headers.list({ parent }));
-    const data = res.data as { containerVersionHeader?: GtmVersionInfo[] };
-    return data.containerVersionHeader ?? [];
+    const versions: GtmVersionInfo[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.containers.version_headers.list({ parent, pageToken }),
+      );
+      const data = res.data as {
+        containerVersionHeader?: GtmVersionInfo[];
+        nextPageToken?: string | null;
+      };
+      versions.push(...(data.containerVersionHeader ?? []));
+      pageToken = data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return versions;
   } catch (err) {
     return handleApiError(err, "listVersions");
   }
@@ -645,7 +815,7 @@ export async function listVersions(): Promise<GtmVersionInfo[]> {
 export async function createVersion(
   name: string,
   description?: string,
-): Promise<GtmVersionInfo | null> {
+): Promise<GtmCreateVersionResult | null> {
   if (!name)
     throw new TagOpsError({
       code: ErrorCode.VALIDATION_FAILED,
@@ -666,7 +836,12 @@ export async function createVersion(
       }),
     );
 
-    return res.data.containerVersion as GtmVersionInfo;
+    const containerVersion = res.data.containerVersion as GtmVersionInfo | undefined;
+    return {
+      ...(containerVersion ?? {}),
+      compilerError: res.data.compilerError ?? undefined,
+      syncStatus: (res.data.syncStatus as GtmSyncStatus | undefined) ?? undefined,
+    };
   } catch (err) {
     return handleApiError(err, "createVersion");
   }

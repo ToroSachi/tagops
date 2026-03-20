@@ -31,7 +31,12 @@ import {
   createTrigger,
   buildHtmlTagConfig,
 } from "./lib/gtm-cli.js";
-import { TRIGGER_MAP, VARIABLE_MAP, ACTION_TO_TRIGGER } from "./lib/architecture.js";
+import {
+  TRIGGER_MAP,
+  VARIABLE_MAP,
+  ACTION_TO_TRIGGER,
+  discoverTriggerByEvent,
+} from "./lib/architecture.js";
 import { loadConfig } from "./lib/config.js";
 import { auditWorkspace } from "./tools/audit.js";
 import type { GtmTag, GtmTrigger, PixelResult } from "./types/gtm.js";
@@ -581,7 +586,10 @@ if (!IS_READ_ONLY) {
 
       for (const pixel of pixels) {
         const action = pixel.action.toLowerCase();
-        let triggerId = ACTION_TO_TRIGGER[action] ?? TRIGGER_MAP.page_view.id;
+        const triggerEvent = ACTION_TO_TRIGGER[action] ?? "page_view";
+        let triggerId = dry_run
+          ? triggerEvent
+          : ((await discoverTriggerByEvent(triggerEvent)) ?? "");
         const tagName = `${vendor_name} – ${action.charAt(0).toUpperCase() + action.slice(1)}${
           pixel.page_filter ? ` (${pixel.page_filter})` : ""
         }`;
@@ -613,6 +621,12 @@ if (!IS_READ_ONLY) {
           if (trigResult?.triggerId) {
             triggerId = trigResult.triggerId;
           }
+        }
+
+        if (!dry_run && !triggerId) {
+          throw new Error(
+            `Could not find a matching GTM trigger for "${triggerEvent}". Create the trigger before installing this pixel.`,
+          );
         }
 
         // Build the HTML

@@ -8,26 +8,146 @@
  * from .gtmrc.json via loadConfig(). See src/lib/config.ts.
  */
 
+import { listTriggers } from "./gtm-cli.js";
+import type { GtmFilterCondition, GtmTrigger } from "../types/gtm.js";
+
 // ── Trigger Map ──
 
 export interface TriggerEntry {
   id: string;
   name: string;
   event: string;
+  namePattern: string;
 }
 
 export const TRIGGER_MAP: Record<string, TriggerEntry> = {
-  page_view: { id: "83", name: "CE - Page View", event: "ce_page_view" },
-  user_data: { id: "84", name: "CE - User Data", event: "user_data" },
-  add_to_cart: { id: "85", name: "CE - Add to Cart", event: "add_to_cart" },
-  remove_from_cart: { id: "86", name: "CE - Remove from Cart", event: "remove_from_cart" },
-  view_item: { id: "87", name: "CE - View Item", event: "view_item" },
-  view_item_list: { id: "88", name: "CE - View Item List", event: "view_item_list" },
-  begin_checkout: { id: "89", name: "CE - Begin Checkout", event: "begin_checkout" },
-  select_item: { id: "90", name: "CE - Select Item", event: "select_item" },
-  referral_landing: { id: "91", name: "CE - Referral Landing", event: "referral_landing" },
-  purchase: { id: "35", name: "CE - Purchase", event: "purchase" },
+  page_view: {
+    id: "page_view",
+    name: "CE - Page View",
+    event: "ce_page_view",
+    namePattern: "^CE - Page View(?:$| \\()",
+  },
+  user_data: {
+    id: "user_data",
+    name: "CE - User Data",
+    event: "user_data",
+    namePattern: "^CE - User Data(?:$| \\()",
+  },
+  add_to_cart: {
+    id: "add_to_cart",
+    name: "CE - Add to Cart",
+    event: "add_to_cart",
+    namePattern: "^CE - Add to Cart(?:$| \\()",
+  },
+  remove_from_cart: {
+    id: "remove_from_cart",
+    name: "CE - Remove from Cart",
+    event: "remove_from_cart",
+    namePattern: "^CE - Remove from Cart(?:$| \\()",
+  },
+  view_item: {
+    id: "view_item",
+    name: "CE - View Item",
+    event: "view_item",
+    namePattern: "^CE - View Item(?:$| \\()",
+  },
+  view_item_list: {
+    id: "view_item_list",
+    name: "CE - View Item List",
+    event: "view_item_list",
+    namePattern: "^CE - View Item List(?:$| \\()",
+  },
+  begin_checkout: {
+    id: "begin_checkout",
+    name: "CE - Begin Checkout",
+    event: "begin_checkout",
+    namePattern: "^CE - Begin Checkout(?:$| \\()",
+  },
+  select_item: {
+    id: "select_item",
+    name: "CE - Select Item",
+    event: "select_item",
+    namePattern: "^CE - Select Item(?:$| \\()",
+  },
+  referral_landing: {
+    id: "referral_landing",
+    name: "CE - Referral Landing",
+    event: "referral_landing",
+    namePattern: "^CE - Referral Landing(?:$| \\()",
+  },
+  purchase: {
+    id: "purchase",
+    name: "CE - Purchase",
+    event: "purchase",
+    namePattern: "^CE - Purchase(?:$| \\()",
+  },
 } as const;
+
+export const ALL_PAGES_TRIGGER_ID = "2147479553";
+
+function getConditionParameterValue(
+  condition: GtmFilterCondition,
+  key: string,
+): string | undefined {
+  return condition.parameter.find((parameter) => parameter.key === key)?.value;
+}
+
+function getTriggerEntry(eventName: string): TriggerEntry | undefined {
+  return TRIGGER_MAP[eventName];
+}
+
+function getMappedCustomEventName(eventName: string): string {
+  return getTriggerEntry(eventName)?.event ?? eventName;
+}
+
+export function matchesCustomEventTrigger(trigger: GtmTrigger, eventName: string): boolean {
+  if (trigger.type !== "CUSTOM_EVENT") {
+    return false;
+  }
+
+  const customEventName = getMappedCustomEventName(eventName);
+  return (trigger.customEventFilter ?? []).some((condition) => {
+    const arg0 = getConditionParameterValue(condition, "arg0");
+    const arg1 = getConditionParameterValue(condition, "arg1");
+
+    if (arg1 !== customEventName) {
+      return false;
+    }
+
+    return arg0 === undefined || arg0 === "{{_event}}" || arg0 === "_event";
+  });
+}
+
+export function selectTriggerForEvent(
+  triggers: GtmTrigger[],
+  eventName: string,
+): GtmTrigger | null {
+  const triggerEntry = getTriggerEntry(eventName);
+  const matchingTriggers = triggers.filter((trigger) =>
+    matchesCustomEventTrigger(trigger, eventName),
+  );
+
+  if (matchingTriggers.length === 0) {
+    return null;
+  }
+
+  if (!triggerEntry) {
+    return matchingTriggers[0] ?? null;
+  }
+
+  const exactNameMatch = matchingTriggers.find((trigger) => trigger.name === triggerEntry.name);
+  if (exactNameMatch) {
+    return exactNameMatch;
+  }
+
+  const namePattern = new RegExp(triggerEntry.namePattern, "i");
+  return matchingTriggers.find((trigger) => namePattern.test(trigger.name)) ?? matchingTriggers[0];
+}
+
+export async function discoverTriggerByEvent(eventName: string): Promise<string | null> {
+  const trigger = selectTriggerForEvent(await listTriggers(), eventName);
+  return trigger?.triggerId ?? null;
+}
 
 // ── Variable Map (DLV key → GTM variable name) ──
 
@@ -48,17 +168,17 @@ export const VARIABLE_MAP: Record<string, string> = {
 // ── Action → Trigger mapping (for pixel implementations) ──
 
 export const ACTION_TO_TRIGGER: Record<string, string> = {
-  purchase: TRIGGER_MAP.purchase.id,
-  signup: TRIGGER_MAP.begin_checkout.id,
-  checkout: TRIGGER_MAP.begin_checkout.id,
-  begin_checkout: TRIGGER_MAP.begin_checkout.id,
-  lead: TRIGGER_MAP.page_view.id,
-  pageview: TRIGGER_MAP.page_view.id,
-  page_view: TRIGGER_MAP.page_view.id,
-  content: TRIGGER_MAP.page_view.id,
-  view_item: TRIGGER_MAP.view_item.id,
-  add_to_cart: TRIGGER_MAP.add_to_cart.id,
-  registration: TRIGGER_MAP.view_item.id,
+  purchase: "purchase",
+  signup: "begin_checkout",
+  checkout: "begin_checkout",
+  begin_checkout: "begin_checkout",
+  lead: "page_view",
+  pageview: "page_view",
+  page_view: "page_view",
+  content: "page_view",
+  view_item: "view_item",
+  add_to_cart: "add_to_cart",
+  registration: "view_item",
 };
 
 // ── Naming conventions ──
@@ -84,7 +204,7 @@ export const NAMING = {
 // ── Built-in trigger IDs (GTM system triggers to exclude from orphan checks) ──
 
 export const BUILTIN_TRIGGER_IDS = new Set([
-  "2147479553", // All Pages
+  ALL_PAGES_TRIGGER_ID, // All Pages
   "2147479572", // Initialization
   "2147479573", // Consent Initialization
 ]);
