@@ -17,15 +17,23 @@ import chalk from "chalk";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+export interface InitCiOptions {
+  branch?: string;
+}
+
 export interface InitCiReport {
+  branch: string;
   filesCreated: string[];
   filesSkipped: string[];
 }
 
-const PR_WORKFLOW = `name: GTM PR Checks
+function buildPrWorkflow(branch: string): string {
+  return `name: GTM PR Checks
 
 on:
   pull_request:
+    branches:
+      - ${branch}
     paths:
       - 'gtm-snapshot.json'
       - '.gtmrc.json'
@@ -37,6 +45,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
         
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -48,28 +58,36 @@ jobs:
 
       - name: Run GTM Linter
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }} // eslint-disable-line no-useless-escape
-          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }} // eslint-disable-line no-useless-escape
+          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }}
         run: tagops lint --snapshot gtm-snapshot.json
 
       - name: Consent Mode v2 Audit
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }} // eslint-disable-line no-useless-escape
-          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }} // eslint-disable-line no-useless-escape
+          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }}
         run: tagops consent-audit --score-only
         
       - name: Generate Changelog
         run: |
-          tagops changelog --from gtm-snapshot.json --to gtm-snapshot.json --output CHANGELOG.md
-          cat CHANGELOG.md > $GITHUB_STEP_SUMMARY
+          git fetch origin ${branch} --depth=1
+          if git cat-file -e origin/${branch}:gtm-snapshot.json 2>/dev/null; then
+            git show origin/${branch}:gtm-snapshot.json > previous-gtm-snapshot.json
+            tagops changelog --from previous-gtm-snapshot.json --to gtm-snapshot.json --output CHANGELOG.md
+            cat CHANGELOG.md >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No previous gtm-snapshot.json found on ${branch}; skipping changelog." >> $GITHUB_STEP_SUMMARY
+          fi
 `;
+}
 
-const DEPLOY_WORKFLOW = `name: GTM Deploy to Production
+function buildDeployWorkflow(branch: string): string {
+  return `name: GTM Deploy to Production
 
 on:
   push:
     branches:
-      - main
+      - ${branch}
     paths:
       - 'gtm-snapshot.json'
 
@@ -90,18 +108,19 @@ jobs:
 
       - name: Restore Snapshot to Workspace
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }} // eslint-disable-line no-useless-escape
-          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }} // eslint-disable-line no-useless-escape
-        run: tagops restore gtm-snapshot.json --dry-run # Remove --dry-run when ready
+          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }}
+        run: tagops restore gtm-snapshot.json
 
       - name: Publish Workspace
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }} // eslint-disable-line no-useless-escape
-          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }} // eslint-disable-line no-useless-escape
+          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }}
         run: |
           COMMIT_MSG=$(git log -1 --pretty=%B)
-          tagops publish --name "Deploy: \${GITHUB_SHA::7}" --description "$COMMIT_MSG" // eslint-disable-line no-useless-escape
+          tagops publish --name "Deploy: \${GITHUB_SHA::7}" --description "$COMMIT_MSG"
 `;
+}
 
 const DRIFT_WORKFLOW = `name: GTM Drift Detection
 
@@ -127,8 +146,8 @@ jobs:
 
       - name: Check for Drift
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }} // eslint-disable-line no-useless-escape
-          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }} // eslint-disable-line no-useless-escape
+          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }}
         run: |
           tagops diff --snapshot gtm-snapshot.json --json > drift-report.json
           CHANGES=$(cat drift-report.json | grep -c '"action":')
@@ -141,8 +160,8 @@ jobs:
 
       - name: Consent Mode v2 Check
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }} // eslint-disable-line no-useless-escape
-          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }} // eslint-disable-line no-useless-escape
+          GOOGLE_APPLICATION_CREDENTIALS: \${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GTM_CREDENTIALS: \${{ secrets.GTM_CREDENTIALS }}
         run: |
           SCORE=$(tagops consent-audit --score-only 2>/dev/null || echo "0")
           echo "Consent Mode v2 Compliance Score: $SCORE%"
@@ -151,8 +170,10 @@ jobs:
           fi
 `;
 
-export function initCi(): InitCiReport {
+export function initCi(options: InitCiOptions = {}): InitCiReport {
+  const branch = options.branch?.trim() || "main";
   const report: InitCiReport = {
+    branch,
     filesCreated: [],
     filesSkipped: [],
   };
@@ -163,18 +184,18 @@ export function initCi(): InitCiReport {
   }
 
   const files = [
-    { name: "gtm-pr-checks.yml", content: PR_WORKFLOW },
-    { name: "gtm-deploy.yml", content: DEPLOY_WORKFLOW },
+    { name: "gtm-pr-checks.yml", content: buildPrWorkflow(branch) },
+    { name: "gtm-deploy.yml", content: buildDeployWorkflow(branch) },
     { name: "gtm-drift-detection.yml", content: DRIFT_WORKFLOW },
   ];
 
   for (const file of files) {
     const filePath = resolve(githubDir, file.name);
     if (existsSync(filePath)) {
-      report.filesSkipped.push(`.github/workflows/\${file.name}`); // eslint-disable-line no-useless-escape
+      report.filesSkipped.push(`.github/workflows/${file.name}`);
     } else {
       writeFileSync(filePath, file.content);
-      report.filesCreated.push(`.github/workflows/\${file.name}`); // eslint-disable-line no-useless-escape
+      report.filesCreated.push(`.github/workflows/${file.name}`);
     }
   }
 
@@ -183,11 +204,12 @@ export function initCi(): InitCiReport {
 
 export function printInitCiReport(report: InitCiReport): void {
   console.log(chalk.bold("\n  GTM CI/CD Initialization\n"));
+  console.log(`  Target branch: ${chalk.cyan(report.branch)}\n`);
 
   if (report.filesCreated.length > 0) {
     console.log(chalk.green("  ✔ Created GitHub Actions workflows:"));
     for (const file of report.filesCreated) {
-      console.log(`    + \${file}`); // eslint-disable-line no-useless-escape
+      console.log(`    + ${file}`);
     }
     console.log();
   }
@@ -195,7 +217,7 @@ export function printInitCiReport(report: InitCiReport): void {
   if (report.filesSkipped.length > 0) {
     console.log(chalk.yellow("  ⚠ Skipped existing files:"));
     for (const file of report.filesSkipped) {
-      console.log(`    - \${file}`); // eslint-disable-line no-useless-escape
+      console.log(`    - ${file}`);
     }
     console.log();
   }

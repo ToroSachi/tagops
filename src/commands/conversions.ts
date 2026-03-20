@@ -30,10 +30,21 @@ export function registerConversionCommands(program: Command) {
     .action(async () => {
       const { assessSSTReadiness, printSSTReadinessReport } =
         await import("../tools/sst-readiness.js");
-      const { listTags, listVariables } = await import("../lib/gtm-cli.js");
+      const { getContainer, listClients, listTags, listTransformations, listVariables } =
+        await import("../lib/gtm-cli.js");
       try {
-        const [tags, variables] = await Promise.all([listTags(), listVariables()]);
-        const report = assessSSTReadiness(tags, variables);
+        const container = await getContainer();
+        const [tags, variables, clients, transformations] = await Promise.all([
+          listTags(),
+          listVariables(),
+          container.features?.supportClients ? listClients() : Promise.resolve([]),
+          container.features?.supportTransformations ? listTransformations() : Promise.resolve([]),
+        ]);
+        const report = assessSSTReadiness(tags, variables, {
+          container,
+          clients,
+          transformations,
+        });
         if (program.opts().json) {
           console.log(JSON.stringify(report, null, 2));
         } else {

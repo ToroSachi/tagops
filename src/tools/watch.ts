@@ -10,10 +10,22 @@
  */
 
 import chalk from "chalk";
-import { listTags, listTriggers, listVariables } from "../lib/gtm-cli.js";
+import {
+  captureWorkspaceSnapshot,
+  compareSnapshots,
+  filterDriftReport,
+  hasDrift,
+  summarizeDriftChanges,
+  type DriftChangeSummary,
+  type DriftReport,
+} from "./drift.js";
 
 // Helper to delay execution
 const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
+export interface WatchOptions {
+  managedOnly?: boolean;
+}
 
 export interface WebhookPayload {
   event: "audit" | "consent_audit" | "publish" | "drift" | "snapshot" | "custom";
@@ -78,6 +90,7 @@ function formatSlackPayload(payload: WebhookPayload): Record<string, unknown> {
       : payload.event === "drift"
         ? "#ffaa00"
         : "#22cc44";
+  const detailsText = formatWebhookDetails(payload.details);
 
   return {
     text: `${emoji} GTM Auto: ${payload.summary}`,
@@ -91,6 +104,7 @@ function formatSlackPayload(payload: WebhookPayload): Record<string, unknown> {
             ? [{ title: "Compliance Score", value: `${payload.score}%`, short: true }]
             : []),
           { title: "Time", value: payload.timestamp, short: true },
+          ...(detailsText ? [{ title: "Changes", value: detailsText, short: false }] : []),
         ],
       },
     ],
@@ -102,6 +116,7 @@ function formatSlackPayload(payload: WebhookPayload): Record<string, unknown> {
  */
 function formatTeamsPayload(payload: WebhookPayload): Record<string, unknown> {
   const emoji = getEventEmoji(payload.event);
+  const detailsText = formatWebhookDetails(payload.details);
 
   return {
     "@type": "MessageCard",
@@ -120,6 +135,7 @@ function formatTeamsPayload(payload: WebhookPayload): Record<string, unknown> {
             : []),
           { name: "Time", value: payload.timestamp },
         ],
+        ...(detailsText ? { text: detailsText.replace(/\n/g, "<br/>") } : {}),
       },
     ],
   };
@@ -179,17 +195,24 @@ export function printNotifyResult(result: NotifyResult): void {
 
 /**
  * Run a background daemon that polls the GTM workspace for changes.
- * Compares current state against a baseline hash and triggers a webhook if drift is detected.
+ * Compares current state against a semantic baseline and triggers a webhook if drift is detected.
  */
-export async function runWatchDaemon(intervalMinutes: number, webhookUrl?: string): Promise<never> {
+export async function runWatchDaemon(
+  intervalMinutes: number,
+  webhookUrl?: string,
+  options: WatchOptions = {},
+): Promise<never> {
   console.log(chalk.bold(`\n👁️  Starting TagOps Watch Daemon`));
   console.log(chalk.cyan(`  Polling interval: ${intervalMinutes} minute(s)`));
   if (webhookUrl) {
     console.log(chalk.cyan(`  Webhooks enabled: Yes`));
   }
+  if (options.managedOnly) {
+    console.log(chalk.cyan(`  Managed-only alerts: Yes`));
+  }
   console.log("");
 
-  let baselineHash = await getWorkspaceHash();
+  let baselineSnapshot = await captureWorkspaceSnapshot();
   console.log(
     chalk.gray(
       `  [${new Date().toLocaleTimeString()}] Baseline established. Monitoring for drift...`,
@@ -201,18 +224,37 @@ export async function runWatchDaemon(intervalMinutes: number, webhookUrl?: strin
     await delay(intervalMinutes * 60 * 1000);
 
     try {
-      const currentHash = await getWorkspaceHash();
+      const currentSnapshot = await captureWorkspaceSnapshot();
+      const fullReport = compareSnapshots(baselineSnapshot, currentSnapshot, {
+        snapshotFile: "live workspace baseline",
+        snapshotTimestamp: baselineSnapshot.meta.timestamp,
+      });
+      const alertReport = options.managedOnly
+        ? filterDriftReport(fullReport, "managed")
+        : fullReport;
 
-      if (currentHash !== baselineHash) {
-        console.log(chalk.yellow(`\n  🚨 [${new Date().toLocaleTimeString()}] DRIFT DETECTED!`));
-        console.log(chalk.yellow(`  The GTM workspace was modified outside of TagOps.`));
+      if (hasDrift(fullReport)) {
+        const changeSummaries = summarizeDriftChanges(alertReport);
 
-        if (webhookUrl) {
-          await notifyEvent(webhookUrl, "drift", "Undocumented changes detected in GTM workspace.");
+        if (changeSummaries.length > 0) {
+          console.log(chalk.yellow(`\n  🚨 [${new Date().toLocaleTimeString()}] DRIFT DETECTED!`));
+          printDriftChangeSummaries(alertReport);
+
+          if (webhookUrl) {
+            await notifyEvent(webhookUrl, "drift", buildDriftSummary(alertReport), {
+              details: buildDriftWebhookDetails(alertReport),
+            });
+          }
+        } else if (options.managedOnly) {
+          console.log(
+            chalk.dim(
+              `  [${new Date().toLocaleTimeString()}] Drift detected, but it only affected unmanaged resources.`,
+            ),
+          );
         }
 
         // Update baseline so we don't spam alerts for the same change
-        baselineHash = currentHash;
+        baselineSnapshot = currentSnapshot;
         console.log(chalk.gray(`  Baseline updated to match new state.`));
       } else {
         // Optional debug logging
@@ -230,25 +272,98 @@ export async function runWatchDaemon(intervalMinutes: number, webhookUrl?: strin
   }
 }
 
-/**
- * Fetches all resources and creates a simple deterministic hash representation.
- */
-async function getWorkspaceHash(): Promise<string> {
-  const [tags, triggers, variables] = await Promise.all([
-    listTags(),
-    listTriggers(),
-    listVariables(),
-  ]);
+function formatWebhookDetails(details?: Record<string, unknown>): string | undefined {
+  const changes = details?.changes;
+  if (!Array.isArray(changes) || changes.length === 0) return undefined;
 
-  // Strip volatile fields that might change without actual config changes (like fingerpints)
-  // Or just rely on the full object since GTM generates new fingerprints on edit.
-  // Actually, GTM updates the `fingerprint` and `path` whenever a resource is modified.
-  // So taking the stringified array of all fingerprints is a very fast and accurate way to detect ANY change.
-  const state = {
-    t: tags.map((t) => t.fingerprint).sort(),
-    tr: triggers.map((t) => t.fingerprint).sort(),
-    v: variables.map((v) => v.fingerprint).sort(),
+  const lines = changes.slice(0, 5).map((change) => {
+    if (!change || typeof change !== "object") return "- change";
+    const entry = change as {
+      type?: string;
+      name?: string;
+      classification?: string;
+      changeType?: string;
+      fields?: string[];
+    };
+    const fields =
+      entry.changeType === "added"
+        ? ": added in live workspace"
+        : entry.changeType === "deleted"
+          ? ": deleted from live workspace"
+          : entry.fields && entry.fields.length > 0
+            ? `: ${entry.fields.join(", ")}`
+            : "";
+    return `- [${entry.type ?? "resource"}] ${entry.name ?? "unknown"} (${entry.classification ?? "unknown"}, ${entry.changeType ?? "changed"})${fields}`;
+  });
+
+  if (changes.length > 5) {
+    lines.push(`- +${changes.length - 5} more change(s)`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildDriftSummary(report: DriftReport): string {
+  const changes = summarizeDriftChanges(report);
+  if (changes.length === 0) {
+    return "Semantic drift detected in GTM workspace.";
+  }
+
+  const managed = changes.filter((entry) => entry.classification === "managed").length;
+  const unmanaged = changes.filter((entry) => entry.classification === "unmanaged").length;
+  return `Semantic drift detected in ${changes.length} resource(s) (${managed} managed, ${unmanaged} unmanaged).`;
+}
+
+function buildDriftWebhookDetails(report: DriftReport): Record<string, unknown> {
+  const changes = summarizeDriftChanges(report).map((entry) => ({
+    name: entry.name,
+    type: entry.type,
+    classification: entry.classification,
+    changeType: entry.changeType,
+    fields: entry.fields,
+  }));
+
+  return {
+    summary: report.summary,
+    changes,
+    fieldDrift: report.driftedResources.map((entry) => ({
+      name: entry.name,
+      type: entry.type,
+      classification: entry.classification,
+      field: entry.field,
+      oldValue: entry.oldValue,
+      newValue: entry.newValue,
+    })),
+    deletedResources: report.deletedResources.map((entry) => ({
+      name: entry.name,
+      type: entry.type,
+      classification: entry.classification,
+    })),
   };
+}
 
-  return JSON.stringify(state);
+function printDriftChangeSummaries(report: DriftReport): void {
+  const changes = summarizeDriftChanges(report);
+  if (changes.length === 0) {
+    console.log(
+      chalk.dim(`  Drift was detected, but no alertable resources matched the current filter.`),
+    );
+    return;
+  }
+
+  for (const change of changes) {
+    console.log(chalk.yellow(`  ${formatDriftChange(change)}`));
+  }
+}
+
+function formatDriftChange(change: DriftChangeSummary): string {
+  const fields =
+    change.changeType === "deleted"
+      ? "deleted"
+      : change.changeType === "added"
+        ? "added"
+        : change.fields.length > 0
+          ? `fields: ${change.fields.join(", ")}`
+          : "added";
+  return `[${change.type}] ${change.name} (${change.classification}, ${change.changeType}) - ${fields}`;
 }

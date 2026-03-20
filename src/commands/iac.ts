@@ -1,5 +1,45 @@
+import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import chalk from "chalk";
+import type { PlanRiskLevel } from "../tools/plan.js";
+
+function riskColor(riskLevel: PlanRiskLevel): (text: string) => string {
+  switch (riskLevel) {
+    case "low":
+      return chalk.green;
+    case "medium":
+      return chalk.yellow;
+    case "high":
+      return chalk.hex("#ff8c00");
+    case "critical":
+      return chalk.red;
+  }
+}
+
+async function confirmRiskyRestore(riskLevel: PlanRiskLevel, useStderr = false): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    throw new Error(
+      `${riskLevel.toUpperCase()} risk restore requires interactive confirmation on stdin.`,
+    );
+  }
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: useStderr ? process.stderr : process.stdout,
+  });
+
+  try {
+    const answer = await rl.question(
+      riskColor(riskLevel)(
+        `\n  ${riskLevel.toUpperCase()} risk restore plan detected. Continue? [y/N]: `,
+      ),
+    );
+    const normalized = answer.trim().toLowerCase();
+    return normalized === "y" || normalized === "yes";
+  } finally {
+    rl.close();
+  }
+}
 
 export function registerIaCCommands(program: Command) {
   program
@@ -19,7 +59,9 @@ export function registerIaCCommands(program: Command) {
               variables: result.variableCount,
               folders: result.folderCount,
               builtInVariables: result.builtInVariableCount,
+              clients: result.clientCount,
               environments: result.environmentCount,
+              transformations: result.transformationCount,
             }),
           );
         } else {
@@ -47,6 +89,25 @@ export function registerIaCCommands(program: Command) {
         } else {
           printDiffReport(report);
         }
+      } catch (err) {
+        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        process.exit(1);
+      }
+    });
+
+  program
+    .command("plan <snapshot>")
+    .description("Preview the restore plan for a snapshot against the live workspace")
+    .action(async (snapshot: string) => {
+      const { plan, printPlan } = await import("../tools/plan.js");
+      try {
+        const result = await plan(snapshot);
+        if (program.opts().json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          printPlan(result);
+        }
+        if (result.riskLevel === "critical") process.exit(1);
       } catch (err) {
         console.error(chalk.red(`\n✖ ${(err as Error).message}`));
         process.exit(1);
@@ -136,13 +197,35 @@ export function registerIaCCommands(program: Command) {
     .option("--dry-run", "Preview what would change without making modifications")
     .option("--delete", "Delete resources that aren't in the snapshot")
     .action(async (file: string, opts: { dryRun?: boolean; delete?: boolean }) => {
+      const { plan, printPlan } = await import("../tools/plan.js");
       const { restoreWorkspace, printRestoreResult } = await import("../tools/restore.js");
       try {
+        const jsonOutput = Boolean(program.opts().json);
+        const restorePlan = await plan(file, {
+          allowDelete: opts.delete ?? false,
+          includeFolders: false,
+        });
+
+        if (!jsonOutput) {
+          printPlan(restorePlan);
+        }
+
+        if (
+          !opts.dryRun &&
+          (restorePlan.riskLevel === "high" || restorePlan.riskLevel === "critical")
+        ) {
+          const confirmed = await confirmRiskyRestore(restorePlan.riskLevel, jsonOutput);
+          if (!confirmed) {
+            console.error(chalk.red("\n✖ Restore aborted.\n"));
+            process.exit(1);
+          }
+        }
+
         const result = await restoreWorkspace(file, {
           dryRun: opts.dryRun ?? false,
           allowDelete: opts.delete ?? false,
         });
-        if (program.opts().json) {
+        if (jsonOutput) {
           console.log(JSON.stringify(result, null, 2));
         } else {
           printRestoreResult(result);
@@ -186,4 +269,51 @@ export function registerIaCCommands(program: Command) {
         }
       },
     );
+
+  program
+    .command("versions")
+    .description("List recent GTM container versions")
+    .option(
+      "--limit <n>",
+      "Maximum number of versions to show (default: 10)",
+      (value: string) => Number.parseInt(value, 10),
+      10,
+    )
+    .action(async (opts: { limit?: number }) => {
+      const { listVersionHistory, printVersionHistory } = await import("../tools/rollback.js");
+      try {
+        const result = await listVersionHistory(opts.limit);
+        if (program.opts().json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          printVersionHistory(result);
+        }
+      } catch (err) {
+        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        process.exit(1);
+      }
+    });
+
+  program
+    .command("rollback <version-id>")
+    .description("Re-publish a historical GTM container version")
+    .option("--dry-run", "Preview the rollback without publishing it live")
+    .action(async (versionId: string, opts: { dryRun?: boolean }) => {
+      const { rollback, printRollbackResult } = await import("../tools/rollback.js");
+      try {
+        const result = await rollback(versionId, { dryRun: opts.dryRun ?? false });
+        if (program.opts().json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          printRollbackResult(result);
+        }
+
+        if (result.error) {
+          process.exit(1);
+        }
+      } catch (err) {
+        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        process.exit(1);
+      }
+    });
 }

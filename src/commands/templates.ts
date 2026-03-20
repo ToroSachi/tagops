@@ -80,10 +80,28 @@ export function registerTemplateCommands(program: Command) {
     .action(async (name: string, opts: { pixelId?: string; measurementId?: string }) => {
       const { validateInstalledTags, printValidationResult } =
         await import("../templates/registry.js");
-      const { listTags } = await import("../lib/gtm-cli.js");
+      const { listTags, listTriggers } = await import("../lib/gtm-cli.js");
+      const { ALL_PAGES_TRIGGER_ID, TRIGGER_MAP, matchesCustomEventTrigger } =
+        await import("../lib/architecture.js");
 
       try {
-        const tags = await listTags();
+        const [tags, triggers] = await Promise.all([listTags(), listTriggers()]);
+        const triggerEventById = new Map<string, string>();
+
+        for (const trigger of triggers) {
+          if (trigger.triggerId === ALL_PAGES_TRIGGER_ID) {
+            triggerEventById.set(trigger.triggerId, "all_pages");
+            continue;
+          }
+
+          for (const eventName of Object.keys(TRIGGER_MAP)) {
+            if (matchesCustomEventTrigger(trigger, eventName)) {
+              triggerEventById.set(trigger.triggerId, eventName);
+              break;
+            }
+          }
+        }
+
         const installedTags = tags.map((t: any) => {
           const htmlParam = t.parameter?.find((p: any) => p.key === "html");
           const consentType = t.consentSettings?.consentType?.list?.[0]?.value;
@@ -92,6 +110,9 @@ export function registerTemplateCommands(program: Command) {
             type: t.type,
             html: htmlParam?.value,
             consentType,
+            triggerEvent: t.firingTriggerId?.map(
+              (triggerId: string) => triggerEventById.get(triggerId) ?? `trigger:${triggerId}`,
+            ),
           };
         });
 

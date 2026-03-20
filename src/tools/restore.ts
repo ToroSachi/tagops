@@ -13,7 +13,9 @@ import { resolve } from "node:path";
 import chalk from "chalk";
 import {
   buildCompleteTagConfig,
+  createFolder,
   listTags,
+  listFolders,
   listTriggers,
   listVariables,
   createTag,
@@ -22,14 +24,16 @@ import {
   updateTrigger,
   createVariable,
   updateVariable,
+  updateFolder,
   deleteTag,
   deleteTrigger,
   deleteVariable,
 } from "../lib/gtm-cli.js";
 import { BUILTIN_TRIGGER_IDS } from "../lib/architecture.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 import { parseSnapshot } from "../types/schemas.js";
 import type { GtmSnapshot } from "./snapshot.js";
-import type { GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
+import type { GtmFolder, GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 type RestorableTag = Partial<GtmTag> & {
   notes?: string;
@@ -56,9 +60,13 @@ type RestorableVariable = Partial<GtmVariable> & {
   parentFolderId?: string;
 };
 
+type RestorableFolder = Partial<GtmFolder> & {
+  notes?: string;
+};
+
 export interface RestoreAction {
   action: "create" | "update" | "delete" | "skip";
-  resourceType: "tag" | "trigger" | "variable";
+  resourceType: "folder" | "tag" | "trigger" | "variable";
   id: string;
   name: string;
   detail?: string;
@@ -69,6 +77,12 @@ export interface RestoreResult {
   snapshotFile: string;
   dryRun: boolean;
   actions: RestoreAction[];
+  folderOperations: {
+    created: number;
+    updated: number;
+    skipped: number;
+    failed: number;
+  };
   summary: {
     created: number;
     updated: number;
@@ -83,18 +97,16 @@ export interface RestoreOptions {
   allowDelete: boolean;
 }
 
-type ResourceKind = "tag" | "trigger" | "variable";
-
 function getTagOpsId(notes?: string): string | undefined {
   if (!notes) return undefined;
-  const match = notes.match(/TagOps-ID:\s*([a-f0-9-]+)/i);
-  return match?.[1];
+  const match = notes.match(/TagOps-ID:\s*([^\n\r]+)/i);
+  return match?.[1]?.trim();
 }
 
 function stripTagOpsId(notes?: string): string | undefined {
   if (!notes) return undefined;
   const withoutId = notes
-    .replace(/(?:^|\n)\s*TagOps-ID:\s*[a-f0-9-]+\s*(?=\n|$)/gi, "\n")
+    .replace(/(?:^|\n)\s*TagOps-ID:\s*[^\n\r]+\s*(?=\n|$)/gi, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return withoutId.length > 0 ? withoutId : undefined;
@@ -111,6 +123,14 @@ function mapTriggerIds(
 ): string[] | undefined {
   if (!ids || ids.length === 0) return undefined;
   return ids.map((id) => triggerIdMap.get(id) ?? id);
+}
+
+function mapFolderId(
+  folderId: string | undefined,
+  folderIdMap: Map<string, string>,
+): string | undefined {
+  if (!folderId) return undefined;
+  return folderIdMap.get(folderId) ?? folderId;
 }
 
 function uniqueById<T extends { name: string }>(
@@ -161,47 +181,82 @@ function normalizeTag(tag: RestorableTag): Record<string, unknown> {
     tagFiringOption: tag.tagFiringOption ?? null,
     paused: tag.paused ?? false,
     consentSettings: tag.consentSettings ?? null,
-    parentFolderId: (tag as GtmTag & { parentFolderId?: string }).parentFolderId ?? null,
+    parentFolderId: tag.parentFolderId ?? null,
     notes: stripTagOpsId(tag.notes),
   };
 }
 
-function normalizeTagWithTriggerMap(
+function normalizeTagWithMaps(
   tag: RestorableTag,
   triggerIdMap: Map<string, string>,
+  folderIdMap: Map<string, string>,
 ): Record<string, unknown> {
   return {
     ...normalizeTag(tag),
     firingTriggerId: normalizeStringArray(mapTriggerIds(tag.firingTriggerId, triggerIdMap)),
     blockingTriggerId: normalizeStringArray(mapTriggerIds(tag.blockingTriggerId, triggerIdMap)),
+    parentFolderId: mapFolderId(tag.parentFolderId, folderIdMap) ?? null,
   };
 }
 
-function normalizeTrigger(trigger: RestorableTrigger): Record<string, unknown> {
+function normalizeTrigger(
+  trigger: RestorableTrigger,
+  folderIdMap?: Map<string, string>,
+): Record<string, unknown> {
   return {
     name: trigger.name,
     type: trigger.type,
     filter: trigger.filter ?? [],
     customEventFilter: trigger.customEventFilter ?? [],
     parameter: trigger.parameter ?? [],
-    parentFolderId: (trigger as GtmTrigger & { parentFolderId?: string }).parentFolderId ?? null,
+    parentFolderId: mapFolderId(trigger.parentFolderId, folderIdMap ?? new Map()) ?? null,
     notes: stripTagOpsId(trigger.notes),
   };
 }
 
-function normalizeVariable(variable: RestorableVariable): Record<string, unknown> {
+function normalizeVariable(
+  variable: RestorableVariable,
+  folderIdMap?: Map<string, string>,
+): Record<string, unknown> {
   return {
     name: variable.name,
     type: variable.type,
     parameter: variable.parameter ?? [],
-    parentFolderId: (variable as GtmVariable & { parentFolderId?: string }).parentFolderId ?? null,
+    parentFolderId: mapFolderId(variable.parentFolderId, folderIdMap ?? new Map()) ?? null,
     notes: stripTagOpsId(variable.notes),
+  };
+}
+
+function normalizeFolder(folder: RestorableFolder): Record<string, unknown> {
+  return {
+    name: folder.name,
+    notes: stripTagOpsId(folder.notes),
+  };
+}
+
+function createFolderConfig(
+  folder: RestorableFolder,
+  current?: RestorableFolder,
+): Record<string, unknown> {
+  return {
+    notes: folder.notes ?? current?.notes,
+  };
+}
+
+function updateFolderConfig(
+  folder: RestorableFolder,
+  current?: RestorableFolder,
+): Record<string, unknown> {
+  return {
+    name: folder.name,
+    notes: folder.notes ?? current?.notes,
   };
 }
 
 function createTagConfig(
   tag: RestorableTag,
   triggerIdMap: Map<string, string>,
+  folderIdMap: Map<string, string>,
   current?: RestorableTag,
 ): Record<string, unknown> {
   const notes = tag.notes ?? current?.notes;
@@ -210,7 +265,7 @@ function createTagConfig(
     consentSettings: tag.consentSettings,
     paused: tag.paused,
     tagFiringOption: tag.tagFiringOption,
-    parentFolderId: tag.parentFolderId,
+    parentFolderId: mapFolderId(tag.parentFolderId, folderIdMap),
     notes,
   };
 
@@ -231,13 +286,14 @@ function createTagConfig(
 function updateTagConfig(
   tag: RestorableTag,
   triggerIdMap: Map<string, string>,
+  folderIdMap: Map<string, string>,
   current?: RestorableTag,
 ): Record<string, unknown> {
   const firingTriggerId = mapTriggerIds(tag.firingTriggerId, triggerIdMap);
   const blockingTriggerId = mapTriggerIds(tag.blockingTriggerId, triggerIdMap);
 
   return buildCompleteTagConfig(tag, {
-    parentFolderId: tag.parentFolderId,
+    parentFolderId: mapFolderId(tag.parentFolderId, folderIdMap),
     notes: tag.notes ?? current?.notes,
     firingTriggerId,
     blockingTriggerId,
@@ -246,19 +302,21 @@ function updateTagConfig(
 
 function createTriggerConfig(
   trigger: RestorableTrigger,
+  folderIdMap: Map<string, string>,
   current?: RestorableTrigger,
 ): Record<string, unknown> {
   return {
     customEventFilter: trigger.customEventFilter,
     filter: trigger.filter,
     parameter: trigger.parameter ?? [],
-    parentFolderId: trigger.parentFolderId,
+    parentFolderId: mapFolderId(trigger.parentFolderId, folderIdMap),
     notes: trigger.notes ?? current?.notes,
   };
 }
 
 function updateTriggerConfig(
   trigger: RestorableTrigger,
+  folderIdMap: Map<string, string>,
   current?: RestorableTrigger,
 ): Record<string, unknown> {
   return {
@@ -266,30 +324,32 @@ function updateTriggerConfig(
     customEventFilter: trigger.customEventFilter,
     filter: trigger.filter,
     parameter: trigger.parameter ?? [],
-    parentFolderId: trigger.parentFolderId,
+    parentFolderId: mapFolderId(trigger.parentFolderId, folderIdMap),
     notes: trigger.notes ?? current?.notes,
   };
 }
 
 function createVariableConfig(
   variable: RestorableVariable,
+  folderIdMap: Map<string, string>,
   current?: RestorableVariable,
 ): Record<string, unknown> {
   return {
     parameter: variable.parameter ?? [],
-    parentFolderId: variable.parentFolderId,
+    parentFolderId: mapFolderId(variable.parentFolderId, folderIdMap),
     notes: variable.notes ?? current?.notes,
   };
 }
 
 function updateVariableConfig(
   variable: RestorableVariable,
+  folderIdMap: Map<string, string>,
   current?: RestorableVariable,
 ): Record<string, unknown> {
   return {
     type: variable.type,
     parameter: variable.parameter ?? [],
-    parentFolderId: variable.parentFolderId,
+    parentFolderId: mapFolderId(variable.parentFolderId, folderIdMap),
     notes: variable.notes ?? current?.notes,
   };
 }
@@ -310,10 +370,122 @@ function resolveSnapshotIdentity<T extends { name: string; notes?: string }>(
   return findMatchingResource(snapshotItem, currentItems, idKey);
 }
 
+async function restoreFolders(
+  snapshotFolders: GtmFolder[],
+  currentFolders: GtmFolder[],
+  dryRun: boolean,
+  actions: RestoreAction[],
+): Promise<{
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  idMap: Map<string, string>;
+}> {
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
+  const idMap = new Map<string, string>();
+
+  for (const snapshotFolder of snapshotFolders) {
+    const currentFolder = resolveSnapshotIdentity(snapshotFolder, currentFolders, "folderId");
+
+    if (!currentFolder) {
+      if (dryRun) {
+        actions.push({
+          action: "create",
+          resourceType: "folder",
+          id: snapshotFolder.folderId,
+          name: snapshotFolder.name,
+          detail: "Would create",
+        });
+        created++;
+        if (snapshotFolder.folderId) idMap.set(snapshotFolder.folderId, snapshotFolder.folderId);
+      } else {
+        const result = await createFolder(snapshotFolder.name, createFolderConfig(snapshotFolder));
+        if (result) {
+          actions.push({
+            action: "create",
+            resourceType: "folder",
+            id: snapshotFolder.folderId,
+            name: snapshotFolder.name,
+            success: true,
+          });
+          created++;
+          if (snapshotFolder.folderId) idMap.set(snapshotFolder.folderId, result.folderId);
+        } else {
+          actions.push({
+            action: "create",
+            resourceType: "folder",
+            id: snapshotFolder.folderId,
+            name: snapshotFolder.name,
+            success: false,
+          });
+          failed++;
+        }
+      }
+      continue;
+    }
+
+    if (snapshotFolder.folderId) idMap.set(snapshotFolder.folderId, currentFolder.folderId);
+    const currentComparable = normalizeFolder(currentFolder);
+    const snapshotComparable = normalizeFolder(snapshotFolder);
+
+    if (isEquivalent(currentComparable, snapshotComparable)) {
+      actions.push({
+        action: "skip",
+        resourceType: "folder",
+        id: currentFolder.folderId,
+        name: snapshotFolder.name,
+        detail: "Already matches snapshot",
+      });
+      skipped++;
+      continue;
+    }
+
+    if (dryRun) {
+      actions.push({
+        action: "update",
+        resourceType: "folder",
+        id: currentFolder.folderId,
+        name: snapshotFolder.name,
+        detail: "Would update",
+      });
+      updated++;
+      continue;
+    }
+
+    try {
+      await updateFolder(currentFolder.folderId, updateFolderConfig(snapshotFolder, currentFolder));
+      actions.push({
+        action: "update",
+        resourceType: "folder",
+        id: currentFolder.folderId,
+        name: snapshotFolder.name,
+        success: true,
+      });
+      updated++;
+    } catch {
+      actions.push({
+        action: "update",
+        resourceType: "folder",
+        id: currentFolder.folderId,
+        name: snapshotFolder.name,
+        success: false,
+      });
+      failed++;
+    }
+  }
+
+  return { created, updated, skipped, failed, idMap };
+}
+
 async function restoreTags(
   snapshotTags: GtmTag[],
   currentTags: GtmTag[],
   triggerIdMap: Map<string, string>,
+  folderIdMap: Map<string, string>,
   dryRun: boolean,
   actions: RestoreAction[],
   keepTagIds: Set<string>,
@@ -340,7 +512,7 @@ async function restoreTags(
           name: snapshotTag.name,
           type: snapshotTag.type,
           firingTriggerId: mapTriggerIds(snapshotTag.firingTriggerId, triggerIdMap) ?? [],
-          config: createTagConfig(snapshotTag, triggerIdMap),
+          config: createTagConfig(snapshotTag, triggerIdMap, folderIdMap),
         });
         if (result) {
           actions.push({
@@ -367,7 +539,7 @@ async function restoreTags(
 
     keepTagIds.add(currentTag.tagId);
     const currentComparable = normalizeTag(currentTag);
-    const snapshotComparable = normalizeTagWithTriggerMap(snapshotTag, triggerIdMap);
+    const snapshotComparable = normalizeTagWithMaps(snapshotTag, triggerIdMap, folderIdMap);
 
     if (isEquivalent(currentComparable, snapshotComparable)) {
       actions.push({
@@ -399,7 +571,7 @@ async function restoreTags(
         name: snapshotTag.name,
         fingerprint: currentTag.fingerprint,
         firingTriggerId: mapTriggerIds(snapshotTag.firingTriggerId, triggerIdMap) ?? [],
-        config: updateTagConfig(snapshotTag, triggerIdMap, currentTag),
+        config: updateTagConfig(snapshotTag, triggerIdMap, folderIdMap, currentTag),
       });
       actions.push({
         action: "update",
@@ -427,6 +599,7 @@ async function restoreTags(
 async function restoreTriggers(
   snapshotTriggers: GtmTrigger[],
   currentTriggers: GtmTrigger[],
+  folderIdMap: Map<string, string>,
   dryRun: boolean,
   actions: RestoreAction[],
   keepTriggerIds: Set<string>,
@@ -463,7 +636,7 @@ async function restoreTriggers(
         const result = await createTrigger(
           snapshotTrigger.name,
           snapshotTrigger.type,
-          createTriggerConfig(snapshotTrigger),
+          createTriggerConfig(snapshotTrigger, folderIdMap),
         );
         if (result) {
           actions.push({
@@ -496,7 +669,7 @@ async function restoreTriggers(
     const snapshotTagOpsId = getTagOpsId(snapshotTrigger.notes);
     if (snapshotTagOpsId) idMap.set(snapshotTagOpsId, currentTrigger.triggerId);
     const currentComparable = normalizeTrigger(currentTrigger);
-    const snapshotComparable = normalizeTrigger(snapshotTrigger);
+    const snapshotComparable = normalizeTrigger(snapshotTrigger, folderIdMap);
 
     if (isEquivalent(currentComparable, snapshotComparable)) {
       actions.push({
@@ -526,7 +699,7 @@ async function restoreTriggers(
       await updateTrigger(currentTrigger.triggerId, {
         name: snapshotTrigger.name,
         type: snapshotTrigger.type,
-        ...updateTriggerConfig(snapshotTrigger, currentTrigger),
+        ...updateTriggerConfig(snapshotTrigger, folderIdMap, currentTrigger),
       });
       actions.push({
         action: "update",
@@ -554,6 +727,7 @@ async function restoreTriggers(
 async function restoreVariables(
   snapshotVariables: GtmVariable[],
   currentVariables: GtmVariable[],
+  folderIdMap: Map<string, string>,
   dryRun: boolean,
   actions: RestoreAction[],
   keepVariableIds: Set<string>,
@@ -583,7 +757,7 @@ async function restoreVariables(
         const result = await createVariable(
           snapshotVariable.name,
           snapshotVariable.type,
-          createVariableConfig(snapshotVariable),
+          createVariableConfig(snapshotVariable, folderIdMap),
         );
         if (result) {
           actions.push({
@@ -610,7 +784,7 @@ async function restoreVariables(
 
     keepVariableIds.add(currentVariable.variableId);
     const currentComparable = normalizeVariable(currentVariable);
-    const snapshotComparable = normalizeVariable(snapshotVariable);
+    const snapshotComparable = normalizeVariable(snapshotVariable, folderIdMap);
 
     if (isEquivalent(currentComparable, snapshotComparable)) {
       actions.push({
@@ -639,7 +813,7 @@ async function restoreVariables(
     try {
       await updateVariable(currentVariable.variableId, {
         name: snapshotVariable.name,
-        ...updateVariableConfig(snapshotVariable, currentVariable),
+        ...updateVariableConfig(snapshotVariable, folderIdMap, currentVariable),
       });
       actions.push({
         action: "update",
@@ -757,6 +931,10 @@ export async function restoreWorkspace(
   snapshotPath: string,
   options: RestoreOptions,
 ): Promise<RestoreResult> {
+  if (!options.dryRun) {
+    await requireWriteAccess();
+  }
+
   const filePath = resolve(snapshotPath);
   if (!existsSync(filePath)) {
     throw new Error(`Snapshot file not found: ${filePath}`);
@@ -765,22 +943,28 @@ export async function restoreWorkspace(
   const raw = readFileSync(filePath, "utf-8");
   const snapshot = parseSnapshot(raw) as GtmSnapshot;
 
-  const currentTags = await listTags();
-  const currentTriggers = await listTriggers();
-  const currentVariables = await listVariables();
-
-  if (currentTags.length === 0 && currentTriggers.length === 0 && !options.dryRun) {
-    throw new Error("Cannot connect to GTM. Run: tagops auth login");
-  }
+  const [currentFolders, currentTags, currentTriggers, currentVariables] = await Promise.all([
+    listFolders(),
+    listTags(),
+    listTriggers(),
+    listVariables(),
+  ]);
 
   const actions: RestoreAction[] = [];
   const keepTagIds = new Set<string>();
   const keepTriggerIds = new Set<string>();
   const keepVariableIds = new Set<string>();
+  const folderResult = await restoreFolders(
+    snapshot.folders ?? [],
+    currentFolders,
+    options.dryRun,
+    actions,
+  );
 
   const variableResult = await restoreVariables(
     snapshot.variables,
     currentVariables,
+    folderResult.idMap,
     options.dryRun,
     actions,
     keepVariableIds,
@@ -788,6 +972,7 @@ export async function restoreWorkspace(
   const triggerResult = await restoreTriggers(
     snapshot.triggers,
     currentTriggers,
+    folderResult.idMap,
     options.dryRun,
     actions,
     keepTriggerIds,
@@ -796,6 +981,7 @@ export async function restoreWorkspace(
     snapshot.tags,
     currentTags,
     triggerResult.idMap,
+    folderResult.idMap,
     options.dryRun,
     actions,
     keepTagIds,
@@ -818,12 +1004,26 @@ export async function restoreWorkspace(
     snapshotFile: filePath,
     dryRun: options.dryRun,
     actions: sortActions(actions),
+    folderOperations: {
+      created: folderResult.created,
+      updated: folderResult.updated,
+      skipped: folderResult.skipped,
+      failed: folderResult.failed,
+    },
     summary: {
-      created: tagResult.created + triggerResult.created + variableResult.created,
-      updated: tagResult.updated + triggerResult.updated + variableResult.updated,
+      created:
+        folderResult.created + tagResult.created + triggerResult.created + variableResult.created,
+      updated:
+        folderResult.updated + tagResult.updated + triggerResult.updated + variableResult.updated,
       deleted: deleteResult.deleted,
-      skipped: tagResult.skipped + triggerResult.skipped + variableResult.skipped,
-      failed: tagResult.failed + triggerResult.failed + variableResult.failed + deleteResult.failed,
+      skipped:
+        folderResult.skipped + tagResult.skipped + triggerResult.skipped + variableResult.skipped,
+      failed:
+        folderResult.failed +
+        tagResult.failed +
+        triggerResult.failed +
+        variableResult.failed +
+        deleteResult.failed,
     },
   };
 }
@@ -846,11 +1046,15 @@ export function printRestoreResult(result: RestoreResult): void {
   }
 
   const s = result.summary;
+  const folders = result.folderOperations;
   console.log(chalk.bold("\n  Summary"));
   console.log(`    Created:  ${s.created}`);
   console.log(`    Updated:  ${s.updated}`);
   console.log(`    Deleted:  ${s.deleted}`);
   console.log(`    Skipped:  ${s.skipped}`);
+  console.log(
+    `    Folders:  ${chalk.green(`+${folders.created}`)} ${chalk.yellow(`~${folders.updated}`)} ${chalk.gray(`=${folders.skipped}`)}`,
+  );
   if (s.failed > 0) console.log(chalk.red(`    Failed:   ${s.failed}`));
   console.log();
 }

@@ -83,7 +83,9 @@ describe("Template Validation", () => {
     const installedTags = preview.tags.map((t) => ({
       name: t.name,
       type: t.type,
+      html: t.html,
       consentType: t.consentType ?? "ad_storage",
+      triggerEvent: t.triggerEvent,
     }));
     const result = validateInstalledTags("meta-pixel", installedTags, {
       pixelId: "123456",
@@ -110,13 +112,48 @@ describe("Template Validation", () => {
     const installedTags = preview.tags.map((t, i) => ({
       name: t.name,
       type: t.type,
+      html: t.html,
       consentType: i === 0 ? "analytics_storage" : "ad_storage", // First tag has wrong consent
+      triggerEvent: t.triggerEvent,
     }));
     const result = validateInstalledTags("meta-pixel", installedTags, {
       pixelId: "123456",
     });
     expect(result.status).toBe("warn");
     expect(result.issues.some((i) => i.type === "consent_mismatch")).toBe(true);
+  });
+
+  it("fails on HTML mismatch with actionable diagnostics", () => {
+    const preview = previewTemplate("meta-pixel", { pixelId: "123456" });
+    const installedTags = preview.tags.map((t, i) => ({
+      name: t.name,
+      type: t.type,
+      html: i === 0 ? "<script>fbq('track','PageView');</script>" : t.html,
+      consentType: t.consentType ?? "ad_storage",
+      triggerEvent: t.triggerEvent,
+    }));
+    const result = validateInstalledTags("meta-pixel", installedTags, {
+      pixelId: "123456",
+    });
+    expect(result.status).toBe("fail");
+    expect(result.issues.some((i) => i.type === "html_mismatch")).toBe(true);
+    expect(result.issues.find((i) => i.type === "html_mismatch")?.recommendation).toBeTruthy();
+  });
+
+  it("fails on trigger mismatch", () => {
+    const preview = previewTemplate("meta-pixel", { pixelId: "123456" });
+    const installedTags = preview.tags.map((t, i) => ({
+      name: t.name,
+      type: t.type,
+      html: t.html,
+      consentType: t.consentType ?? "ad_storage",
+      triggerEvent: i === 0 ? "purchase" : t.triggerEvent,
+    }));
+    const result = validateInstalledTags("meta-pixel", installedTags, {
+      pixelId: "123456",
+    });
+    expect(result.status).toBe("fail");
+    expect(result.issues.some((i) => i.type === "trigger_mismatch")).toBe(true);
   });
 
   it("flags extra tags from the same vendor", () => {

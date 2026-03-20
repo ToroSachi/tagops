@@ -144,6 +144,76 @@ describe("Changelog Generator", () => {
     expect(report.summary).toBe("No changes");
   });
 
+  it("includes folders and environments in changelog entries", async () => {
+    const { generateChangelog } = await import("../tools/changelog.js");
+    const oldSnap = {
+      version: "1.0",
+      timestamp: "2026-03-15T00:00:00Z",
+      account: { accountId: "1", containerId: "2", workspaceId: "3" },
+      tags: [],
+      triggers: [],
+      variables: [],
+      folders: [
+        {
+          folderId: "10",
+          name: "Archive",
+          fingerprint: "folder-a",
+          path: "accounts/1/containers/2/workspaces/3/folders/10",
+        },
+      ],
+      environments: [
+        {
+          environmentId: "20",
+          name: "Live",
+          type: "live",
+          url: "https://old.example.com",
+          fingerprint: "env-a",
+          path: "accounts/1/containers/2/environments/20",
+        },
+      ],
+    };
+    const newSnap = {
+      version: "1.0",
+      timestamp: "2026-03-16T00:00:00Z",
+      account: { accountId: "1", containerId: "2", workspaceId: "3" },
+      tags: [],
+      triggers: [],
+      variables: [],
+      folders: [
+        {
+          folderId: "11",
+          name: "Launch",
+          fingerprint: "folder-b",
+          path: "accounts/1/containers/2/workspaces/3/folders/11",
+        },
+      ],
+      environments: [
+        {
+          environmentId: "20",
+          name: "Live",
+          type: "live",
+          url: "https://new.example.com",
+          fingerprint: "env-a",
+          path: "accounts/1/containers/2/environments/20",
+        },
+      ],
+    };
+    writeFileSync(snap1Path, JSON.stringify(oldSnap));
+    writeFileSync(snap2Path, JSON.stringify(newSnap));
+
+    const report = await generateChangelog({ from: snap1Path, to: snap2Path });
+
+    expect(report.entries.some((e) => e.resource === "folder" && e.action === "added")).toBe(true);
+    expect(
+      report.entries.some(
+        (e) =>
+          e.resource === "environment" &&
+          e.action === "modified" &&
+          e.details?.includes("URL updated"),
+      ),
+    ).toBe(true);
+  });
+
   // Cleanup
   it("cleanup temp files", () => {
     if (existsSync(snap1Path)) unlinkSync(snap1Path);

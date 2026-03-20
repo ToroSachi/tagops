@@ -14,6 +14,16 @@ export const CONFIG_FILENAME = ".gtmrc.json";
 
 // ── Zod schema for config validation ──
 
+const PromotionEnvironmentSchema = z.enum(["development", "staging", "production"]);
+
+export type PromotionEnvironment = z.infer<typeof PromotionEnvironmentSchema>;
+
+export const DEFAULT_PROMOTION_FLOW: PromotionEnvironment[] = [
+  "development",
+  "staging",
+  "production",
+];
+
 const GtmProfileSchema = z.object({
   name: z.string().min(1, "profile name is required"),
   accountId: z.string().min(1, "accountId is required"),
@@ -21,6 +31,7 @@ const GtmProfileSchema = z.object({
   workspaceId: z.string().min(1, "workspaceId is required"),
   ga4MeasurementId: z.string().optional(),
   metaPixelId: z.string().optional(),
+  environment: PromotionEnvironmentSchema.optional(),
 });
 
 export type GtmProfile = z.infer<typeof GtmProfileSchema>;
@@ -33,6 +44,13 @@ const GtmConfigSchema = z.object({
   metaPixelId: z.string().optional(),
   integrations: z.array(z.string()).optional(),
   profiles: z.array(GtmProfileSchema).optional(),
+  promotionFlow: z
+    .array(PromotionEnvironmentSchema)
+    .min(2, "promotionFlow must contain at least two environments")
+    .refine((flow) => new Set(flow).size === flow.length, {
+      message: "promotionFlow cannot contain duplicate environments",
+    })
+    .optional(),
   customTriggers: z
     .record(
       z.object({
@@ -76,6 +94,23 @@ export function normalizeProfileName(profileName?: string): string | undefined {
  */
 export function setDefaultProfileName(profileName?: string): void {
   defaultProfileName = normalizeProfileName(profileName);
+}
+
+export function getDefaultProfileName(): string | undefined {
+  return defaultProfileName;
+}
+
+export async function withDefaultProfileName<T>(
+  profileName: string | undefined,
+  fn: () => T | Promise<T>,
+): Promise<T> {
+  const previous = defaultProfileName;
+  setDefaultProfileName(profileName);
+  try {
+    return await fn();
+  } finally {
+    defaultProfileName = previous;
+  }
 }
 
 /**
@@ -169,6 +204,7 @@ export function listProfileConfigs(): Array<{
   workspaceId: string;
   ga4MeasurementId?: string;
   metaPixelId?: string;
+  environment?: PromotionEnvironment;
 }> {
   const config = loadConfig("default");
 
@@ -188,6 +224,7 @@ export function listProfileConfigs(): Array<{
       workspaceId: profile.workspaceId,
       ga4MeasurementId: profile.ga4MeasurementId,
       metaPixelId: profile.metaPixelId,
+      environment: profile.environment,
     })),
   ];
 }
@@ -230,4 +267,118 @@ export function hasConfig(): boolean {
  */
 export function getConfigPath(): string | null {
   return findConfigPath();
+}
+
+function getConfigErrorPath(): string {
+  return getConfigPath() ?? CONFIG_FILENAME;
+}
+
+function getBaseConfigAndProfile(profileName: string): {
+  config: GtmConfig;
+  normalizedProfileName?: string;
+  profile?: GtmProfile;
+} {
+  const normalizedProfileName = normalizeProfileName(profileName);
+  const config = loadConfig("default");
+
+  if (!normalizedProfileName) {
+    return { config, normalizedProfileName };
+  }
+
+  const profile = config.profiles?.find((entry) => entry.name === normalizedProfileName);
+  if (!profile) {
+    const available = config.profiles?.map((entry) => entry.name).join(", ") ?? "(none)";
+    throw new ConfigError(
+      `Profile "${normalizedProfileName}" not found. Available: ${available}`,
+      getConfigErrorPath(),
+    );
+  }
+
+  return { config, normalizedProfileName, profile };
+}
+
+function inferEnvironmentFromProfileName(profileName?: string): PromotionEnvironment | undefined {
+  if (!profileName) return undefined;
+  const lower = profileName.toLowerCase();
+  const parsed = PromotionEnvironmentSchema.safeParse(lower);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function getPromotionFlow(config?: GtmConfig): PromotionEnvironment[] {
+  return [...(config?.promotionFlow ?? DEFAULT_PROMOTION_FLOW)];
+}
+
+export function getProfileEnvironment(profileName: string): PromotionEnvironment | undefined {
+  const { profile, normalizedProfileName } = getBaseConfigAndProfile(profileName);
+  return profile?.environment ?? inferEnvironmentFromProfileName(normalizedProfileName);
+}
+
+export interface PromotionValidationResult {
+  sourceProfile: string;
+  targetProfile: string;
+  sourceEnvironment: PromotionEnvironment;
+  targetEnvironment: PromotionEnvironment;
+  allowedFlow: PromotionEnvironment[];
+}
+
+export function validatePromotionFlow(
+  sourceProfile: string,
+  targetProfile: string,
+): PromotionValidationResult {
+  const sourceProfileInfo = getBaseConfigAndProfile(sourceProfile);
+  const targetProfileInfo = getBaseConfigAndProfile(targetProfile);
+  const allowedFlow = getPromotionFlow(sourceProfileInfo.config);
+
+  const sourceEnvironment =
+    sourceProfileInfo.profile?.environment ??
+    inferEnvironmentFromProfileName(sourceProfileInfo.normalizedProfileName);
+  const targetEnvironment =
+    targetProfileInfo.profile?.environment ??
+    inferEnvironmentFromProfileName(targetProfileInfo.normalizedProfileName);
+
+  if (!sourceEnvironment) {
+    throw new ConfigError(
+      `Source profile "${sourceProfile}" must set "environment" or use a profile name matching one of: ${DEFAULT_PROMOTION_FLOW.join(", ")}`,
+      getConfigErrorPath(),
+    );
+  }
+
+  if (!targetEnvironment) {
+    throw new ConfigError(
+      `Target profile "${targetProfile}" must set "environment" or use a profile name matching one of: ${DEFAULT_PROMOTION_FLOW.join(", ")}`,
+      getConfigErrorPath(),
+    );
+  }
+
+  const sourceIndex = allowedFlow.indexOf(sourceEnvironment);
+  const targetIndex = allowedFlow.indexOf(targetEnvironment);
+
+  if (sourceIndex === -1) {
+    throw new ConfigError(
+      `Source environment "${sourceEnvironment}" is not allowed by promotionFlow: ${allowedFlow.join(" -> ")}`,
+      getConfigErrorPath(),
+    );
+  }
+
+  if (targetIndex === -1) {
+    throw new ConfigError(
+      `Target environment "${targetEnvironment}" is not allowed by promotionFlow: ${allowedFlow.join(" -> ")}`,
+      getConfigErrorPath(),
+    );
+  }
+
+  if (targetIndex !== sourceIndex + 1) {
+    throw new ConfigError(
+      `Invalid promotion path: ${sourceEnvironment} -> ${targetEnvironment}. Allowed next step after ${sourceEnvironment} is ${allowedFlow[sourceIndex + 1] ?? "(none)"}. Full flow: ${allowedFlow.join(" -> ")}`,
+      getConfigErrorPath(),
+    );
+  }
+
+  return {
+    sourceProfile,
+    targetProfile,
+    sourceEnvironment,
+    targetEnvironment,
+    allowedFlow,
+  };
 }

@@ -9,9 +9,12 @@ vi.mock("../lib/gtm-cli.js", () => ({
     ...(structuredClone(tag) as Record<string, unknown>),
     ...overrides,
   })),
+  listFolders: vi.fn(),
   listTags: vi.fn(),
   listTriggers: vi.fn(),
   listVariables: vi.fn(),
+  createFolder: vi.fn(),
+  updateFolder: vi.fn(),
   createTag: vi.fn(),
   updateTag: vi.fn(),
   deleteTag: vi.fn(),
@@ -25,6 +28,11 @@ vi.mock("../lib/gtm-cli.js", () => ({
 
 vi.mock("../lib/architecture.js", () => ({
   BUILTIN_TRIGGER_IDS: new Set<string>(),
+}));
+
+vi.mock("../lib/permission-guard.js", () => ({
+  requireWriteAccess: vi.fn(),
+  requirePublishAccess: vi.fn(),
 }));
 
 const SNAPSHOT_PATH = resolve("/tmp/tagops-restore-test.json");
@@ -47,6 +55,7 @@ function makeSnapshot(payload: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(gtmCli.listFolders).mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -192,6 +201,71 @@ describe("restoreWorkspace", () => {
     expect(result.summary.created).toBe(0);
     expect(result.summary.updated).toBe(4);
     expect(result.summary.failed).toBe(0);
+  });
+
+  it("creates folders before child resources and remaps parentFolderId", async () => {
+    makeSnapshot({
+      tags: [],
+      triggers: [],
+      variables: [
+        {
+          variableId: "snap-var-1",
+          name: "CONST - Folder Scoped",
+          type: "c",
+          fingerprint: "snap-var-fp",
+          parentFolderId: "snap-folder-1",
+          parameter: [{ type: "template", key: "value", value: "folder-value" }],
+        },
+      ],
+      folders: [
+        {
+          folderId: "snap-folder-1",
+          name: "Marketing",
+          fingerprint: "snap-folder-fp",
+          path: "accounts/1/containers/2/workspaces/3/folders/snap-folder-1",
+        },
+      ],
+    });
+
+    vi.mocked(gtmCli.listTags).mockResolvedValue([
+      {
+        tagId: "live-tag-sentinel",
+        name: "Sentinel",
+        type: "html",
+        fingerprint: "live-tag-sentinel-fp",
+      } as never,
+    ]);
+    vi.mocked(gtmCli.listTriggers).mockResolvedValue([]);
+    vi.mocked(gtmCli.listVariables).mockResolvedValue([]);
+    vi.mocked(gtmCli.listFolders).mockResolvedValue([]);
+
+    vi.mocked(gtmCli.createFolder).mockResolvedValue({
+      folderId: "live-folder-9",
+      name: "Marketing",
+      fingerprint: "live-folder-fp",
+      path: "accounts/1/containers/2/workspaces/3/folders/live-folder-9",
+    } as any);
+    vi.mocked(gtmCli.createVariable).mockResolvedValue({ variableId: "live-var-9" } as never);
+
+    const result = await restoreWorkspace(SNAPSHOT_PATH, { dryRun: false, allowDelete: false });
+
+    expect(gtmCli.createFolder).toHaveBeenCalledWith("Marketing", expect.any(Object));
+    expect(gtmCli.createVariable).toHaveBeenCalledWith(
+      "CONST - Folder Scoped",
+      "c",
+      expect.objectContaining({ parentFolderId: "live-folder-9" }),
+    );
+    const createFolderMock = gtmCli.createFolder as unknown as {
+      mock: { invocationCallOrder: number[] };
+    };
+    const createVariableMock = gtmCli.createVariable as unknown as {
+      mock: { invocationCallOrder: number[] };
+    };
+    expect(createFolderMock.mock.invocationCallOrder[0]).toBeLessThan(
+      createVariableMock.mock.invocationCallOrder[0],
+    );
+    expect(result.folderOperations.created).toBe(1);
+    expect(result.summary.created).toBe(2);
   });
 
   it("deletes only unmatched logical resources when allowDelete is enabled", async () => {

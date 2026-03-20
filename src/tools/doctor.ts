@@ -94,7 +94,8 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   // 4. API connectivity + resource counts
   try {
-    const { listTags, listTriggers, listVariables } = await import("../lib/gtm-cli.js");
+    const gtmCli = await import("../lib/gtm-cli.js");
+    const { listTags, listTriggers, listVariables } = gtmCli;
     const [tags, triggers, variables] = await Promise.all([
       listTags(),
       listTriggers(),
@@ -113,6 +114,42 @@ export async function runDoctor(): Promise<DoctorReport> {
         status: "warn",
         detail: "Connected but workspace appears empty (0 tags, 0 triggers)",
       });
+    }
+
+    if (
+      typeof gtmCli.getCurrentUserPermission === "function" &&
+      typeof gtmCli.getEffectiveContainerPermission === "function"
+    ) {
+      try {
+        const permission = await gtmCli.getCurrentUserPermission();
+        if (permission) {
+          const containerPermission = gtmCli.getEffectiveContainerPermission(permission);
+          if (containerPermission === "read" || containerPermission === "noAccess") {
+            checks.push({
+              name: "GTM Write Permissions",
+              status: "warn",
+              detail: `Authenticated as ${permission.emailAddress} with ${containerPermission} access. Write and publish commands will fail.`,
+            });
+          } else {
+            checks.push({
+              name: "GTM Write Permissions",
+              status: "pass",
+              detail: `Authenticated as ${permission.emailAddress} with ${containerPermission} container access.`,
+            });
+          }
+        }
+      } catch (err) {
+        if (
+          typeof gtmCli.isPermissionLookupError !== "function" ||
+          !gtmCli.isPermissionLookupError(err)
+        ) {
+          checks.push({
+            name: "GTM Write Permissions",
+            status: "warn",
+            detail: "Could not verify GTM write permissions for the current user.",
+          });
+        }
+      }
     }
 
     // 5. Resource health

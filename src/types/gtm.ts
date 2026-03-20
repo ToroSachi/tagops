@@ -5,6 +5,24 @@
  * These match the Google Tag Manager API v2 resource shapes.
  */
 
+export type GtmAccountPermission = "noAccess" | "read" | "user" | "admin";
+export type GtmContainerPermission = "noAccess" | "read" | "edit" | "approve" | "publish";
+
+export interface GtmAccountAccess {
+  permission: GtmAccountPermission;
+}
+
+export interface GtmContainerAccess {
+  containerId: string;
+  permission: GtmContainerPermission;
+}
+
+export interface GtmUserPermission {
+  emailAddress: string;
+  accountAccess: GtmAccountAccess;
+  containerAccess: GtmContainerAccess[];
+}
+
 // ── Parameter types ──
 
 export interface GtmParameter {
@@ -62,6 +80,7 @@ export interface GtmTag {
   blockingTriggerId?: string[];
   parameter?: GtmParameter[];
   consentSettings?: GtmConsentSettings;
+  notes?: string;
   fingerprint: string;
   paused?: boolean;
   parentFolderId?: string;
@@ -114,6 +133,39 @@ export interface GtmBuiltInVariable {
   name: string;
   type: string;
   path: string;
+  accountId?: string;
+  containerId?: string;
+  workspaceId?: string;
+}
+
+// ── Client ──
+
+export interface GtmClient {
+  clientId: string;
+  name: string;
+  type: string;
+  parameter?: GtmParameter[];
+  priority?: number;
+  fingerprint: string;
+  path: string;
+  notes?: string;
+  parentFolderId?: string;
+  accountId?: string;
+  containerId?: string;
+  workspaceId?: string;
+}
+
+// ── Transformation ──
+
+export interface GtmTransformation {
+  transformationId: string;
+  name: string;
+  type: string;
+  parameter?: GtmParameter[];
+  fingerprint: string;
+  path: string;
+  notes?: string;
+  parentFolderId?: string;
   accountId?: string;
   containerId?: string;
   workspaceId?: string;
@@ -183,6 +235,20 @@ export interface GtmEnvironment {
   type: string;
   url?: string;
   fingerprint: string;
+  path: string;
+}
+
+// ── Versions ──
+
+export interface GtmVersionHeader {
+  containerVersionId: string;
+  name: string;
+  description?: string;
+  numTags?: string;
+  numTriggers?: string;
+  numVariables?: string;
+  deleted?: boolean;
+  fingerprint?: string;
   path: string;
 }
 

@@ -26,11 +26,16 @@ const OAUTH_CLIENT_ID =
   "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com";
 const OAUTH_CLIENT_SECRET = process.env.TAGOPS_CLIENT_SECRET || "d-FL95Q19q7MQmFpd7hHD0Ty";
 
+const TAGMANAGER_MANAGE_USERS_SCOPE = "https://www.googleapis.com/auth/tagmanager.manage.users";
+const USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
+
 const SCOPES = [
   "https://www.googleapis.com/auth/tagmanager.edit.containers",
   "https://www.googleapis.com/auth/tagmanager.readonly",
   "https://www.googleapis.com/auth/tagmanager.edit.containerversions",
   "https://www.googleapis.com/auth/tagmanager.publish",
+  TAGMANAGER_MANAGE_USERS_SCOPE,
+  USERINFO_EMAIL_SCOPE,
 ];
 const CREDENTIALS_FILE = resolve(homedir(), ".tagops-credentials.json");
 const GTM_CLI_CREDENTIALS = resolve(homedir(), ".config/gtm-cli/credentials.json");
@@ -40,6 +45,91 @@ const GTM_CLI_CREDENTIALS = resolve(homedir(), ".config/gtm-cli/credentials.json
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GtmAuthClient = AuthClient | GoogleAuth | OAuth2Client;
 let authClient: GtmAuthClient | null = null;
+
+type StoredOauthCredentials = {
+  type?: string;
+  client_id?: string;
+  client_secret?: string;
+  refresh_token?: string | null;
+  access_token?: string | null;
+  email?: string;
+  imported_from?: string;
+  imported_at?: string;
+};
+
+type CredentialsProvider = {
+  getCredentials: () => Promise<{ client_email?: string | null }>;
+};
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function readStoredOauthEmail(): string | undefined {
+  if (!existsSync(CREDENTIALS_FILE)) return undefined;
+
+  try {
+    const data = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as StoredOauthCredentials;
+    if (typeof data.email === "string" && data.email.trim().length > 0) {
+      return normalizeEmail(data.email);
+    }
+  } catch {
+    // Ignore malformed cached credentials here; auth loading handles the real error path.
+  }
+
+  return undefined;
+}
+
+async function getOAuthClientEmail(
+  client: OAuth2Client,
+  options: { useCache?: boolean } = {},
+): Promise<string | undefined> {
+  if (options.useCache !== false) {
+    const cachedEmail = readStoredOauthEmail();
+    if (cachedEmail) return cachedEmail;
+  }
+
+  const accessToken = await client.getAccessToken();
+  const token = typeof accessToken === "string" ? accessToken : accessToken?.token;
+  if (!token) return undefined;
+
+  const tokenInfo = await client.getTokenInfo(token);
+  if (typeof tokenInfo.email === "string" && tokenInfo.email.trim().length > 0) {
+    return normalizeEmail(tokenInfo.email);
+  }
+
+  return undefined;
+}
+
+async function getServiceAccountEmail(client: GtmAuthClient): Promise<string | undefined> {
+  const maybeClient = client as Partial<CredentialsProvider> & { email?: string | null };
+
+  if (typeof maybeClient.email === "string" && maybeClient.email.trim().length > 0) {
+    return normalizeEmail(maybeClient.email);
+  }
+
+  if (typeof maybeClient.getCredentials === "function") {
+    const credentials = await maybeClient.getCredentials();
+    if (
+      typeof credentials.client_email === "string" &&
+      credentials.client_email.trim().length > 0
+    ) {
+      return normalizeEmail(credentials.client_email);
+    }
+  }
+
+  return undefined;
+}
+
+export async function getCurrentAuthenticatedEmail(): Promise<string | undefined> {
+  const client = await getAuthClient();
+
+  if (client instanceof OAuth2Client) {
+    return getOAuthClientEmail(client);
+  }
+
+  return getServiceAccountEmail(client);
+}
 
 export async function getAuthClient(): Promise<GtmAuthClient> {
   if (authClient) return authClient;
@@ -113,7 +203,8 @@ export async function checkAuthStatus(): Promise<{
     if (client.constructor.name === "OAuth2Client") method = "OAuth2 (tagops auth login)";
     else if (process.env.GTM_CREDENTIALS) method = "GTM_CREDENTIALS Env Var";
 
-    return { authenticated: true, method };
+    const email = await getCurrentAuthenticatedEmail().catch(() => undefined);
+    return { authenticated: true, method, email };
   } catch (err: unknown) {
     return { authenticated: false, method: "none", error: (err as Error).message };
   }
@@ -169,6 +260,7 @@ export async function loginWithOAuth(): Promise<{
         );
 
         const { tokens } = await oauth2Client.getToken(code);
+        oauth2Client.setCredentials(tokens);
 
         if (!tokens.refresh_token) {
           res.writeHead(200, { "Content-Type": "text/html" });
@@ -184,11 +276,15 @@ export async function loginWithOAuth(): Promise<{
         }
 
         // Save credentials
+        const email = await getOAuthClientEmail(oauth2Client, { useCache: false }).catch(
+          () => undefined,
+        );
         const creds = {
           type: "oauth",
           client_id: OAUTH_CLIENT_ID,
           client_secret: OAUTH_CLIENT_SECRET,
           refresh_token: tokens.refresh_token,
+          email,
         };
         writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 });
 
@@ -287,12 +383,16 @@ export async function importFromGtmCli(): Promise<{ success: boolean; message: s
     // Note: access tokens expire (~1h), so this is a temporary bridge.
     // We do NOT save the gtm-cli refresh token because it belongs to a different client ID
     // and would cause "unauthorized_client" errors if we tried to use it.
+    const email = await getOAuthClientEmail(oauth2Client, { useCache: false }).catch(
+      () => undefined,
+    );
     const creds = {
       type: "oauth",
       client_id: OAUTH_CLIENT_ID,
       client_secret: OAUTH_CLIENT_SECRET,
       refresh_token: null, // Always null for imports
       access_token: data.accessToken,
+      email,
       imported_from: "gtm-cli",
       imported_at: new Date().toISOString(),
     };

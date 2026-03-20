@@ -23,6 +23,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import { installTemplate, listTemplates, type InstallResult } from "../templates/registry.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 
 export interface DeployManifest {
   name: string;
@@ -86,6 +87,10 @@ export async function deployManifest(
 ): Promise<DeployResult> {
   const manifest = loadManifest(manifestPath);
   const dryRun = options.dryRun ?? false;
+  if (!dryRun) {
+    await requireWriteAccess();
+  }
+
   const results: InstallResult[] = [];
   let skipped = 0;
 

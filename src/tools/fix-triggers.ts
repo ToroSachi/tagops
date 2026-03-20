@@ -7,6 +7,7 @@
 
 import chalk from "chalk";
 import { buildCompleteTagConfig, getTag, updateTag } from "../lib/gtm-cli.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 
 export interface FixTriggersResult {
   tagId: string;
@@ -23,6 +24,8 @@ export async function fixTriggers(mapping: Record<string, string>): Promise<FixT
         'Use --mapping mapping.json with format: {"tagId": "triggerId", ...}',
     );
   }
+
+  await requireWriteAccess();
 
   const results: FixTriggersResult[] = [];
 

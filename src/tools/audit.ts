@@ -28,6 +28,7 @@ import {
   deleteVariable,
 } from "../lib/gtm-cli.js";
 import { BUILTIN_TRIGGER_IDS, isLightweightPixel, isAdVendor } from "../lib/architecture.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 import type { AuditIssue, AuditReport, GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 // Risky patterns in Custom HTML that indicate security/injection risks
@@ -617,6 +618,8 @@ export function printAuditReport(report: AuditReport): void {
  * Run interactive prompts to clean up the container natively.
  */
 export async function runInteractiveFix(report: AuditReport): Promise<void> {
+  await requireWriteAccess();
+
   console.log(chalk.bold("\n=== Interactive Auto-Fix ==="));
 
   const unusedVars = report.issues.filter((i) => i.type === "UNUSED_VARIABLE");

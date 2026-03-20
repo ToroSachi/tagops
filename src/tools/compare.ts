@@ -126,8 +126,8 @@ async function fetchContainerResources(profileName: string): Promise<ContainerSn
  * Extract a stable matching key from notes when available, falling back to name.
  */
 export function getResourceKey(item: { name: string; notes?: string }): string {
-  const match = item.notes?.match(/TagOps-ID:\s*([a-f0-9-]+)/);
-  return match && match[1] ? match[1] : item.name;
+  const match = item.notes?.match(/TagOps-ID:\s*([^\n\r]+)/i);
+  return match?.[1]?.trim() || item.name;
 }
 
 function normalizeComparableValue(value: unknown): ComparableValue {

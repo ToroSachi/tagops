@@ -7,18 +7,26 @@
  */
 
 import { tagmanager } from "@googleapis/tagmanager";
+import type { tagmanager_v2 } from "@googleapis/tagmanager";
 import crypto from "node:crypto";
-import { getAuthClient } from "./auth.js";
+import { getAuthClient, getCurrentAuthenticatedEmail } from "./auth.js";
 import { loadConfig, ConfigError } from "./config.js";
 import type {
+  GtmAccountAccess,
   GtmBuiltInVariable,
+  GtmClient,
+  GtmContainerAccess,
+  GtmContainerPermission,
+  GtmConsentSettings,
+  GtmEnvironment,
+  GtmFolder,
+  GtmParameter,
   GtmTag,
   GtmTrigger,
+  GtmTransformation,
+  GtmUserPermission,
   GtmVariable,
-  GtmFolder,
-  GtmEnvironment,
-  GtmConsentSettings,
-  GtmParameter,
+  GtmVersionHeader,
 } from "../types/gtm.js";
 import { TagOpsError, ErrorCode } from "./errors.js";
 
@@ -97,6 +105,32 @@ export function getContainerPath(): string {
   return `accounts/${config.accountId}/containers/${config.containerId}`;
 }
 
+export interface GtmContainerMetadata {
+  accountId?: string;
+  containerId?: string;
+  features?: {
+    supportBuiltInVariables?: boolean | null;
+    supportClients?: boolean | null;
+    supportEnvironments?: boolean | null;
+    supportFolders?: boolean | null;
+    supportTags?: boolean | null;
+    supportTransformations?: boolean | null;
+    supportTriggers?: boolean | null;
+    supportVariables?: boolean | null;
+  } | null;
+  name?: string;
+  notes?: string;
+  path?: string;
+  publicId?: string;
+  taggingServerUrls?: string[];
+  usageContext?: string[];
+}
+
+function getAccountPath(profileName?: string): string {
+  const config = loadConfig(profileName);
+  return `accounts/${config.accountId}`;
+}
+
 async function handleApiError(err: unknown, operation: string): Promise<never> {
   if (
     err instanceof ConfigError ||
@@ -123,6 +157,202 @@ async function handleApiError(err: unknown, operation: string): Promise<never> {
     code: ErrorCode.INTERNAL_ERROR,
     message: `GTM API failed during ${operation}: ${details}`,
   });
+}
+
+function isUnsupportedWorkspaceFeatureError(err: unknown): boolean {
+  const error = err as {
+    response?: { status?: number; data?: { error?: { message?: string } } };
+    message?: string;
+  };
+  if (error.response?.status !== 400) return false;
+
+  const details = (error.response?.data?.error?.message || error.message || "").toLowerCase();
+
+  return (
+    details.includes("not supported") ||
+    details.includes("unsupported") ||
+    details.includes("does not support")
+  );
+}
+
+function normalizeAccountPermission(permission?: string | null): GtmAccountAccess["permission"] {
+  switch (permission) {
+    case "admin":
+    case "user":
+    case "read":
+    case "noAccess":
+      return permission;
+    default:
+      return "noAccess";
+  }
+}
+
+function normalizeContainerPermission(
+  permission?: string | null,
+): GtmContainerAccess["permission"] {
+  switch (permission) {
+    case "publish":
+    case "approve":
+    case "edit":
+    case "read":
+    case "noAccess":
+      return permission;
+    case "admin":
+      return "publish";
+    case "user":
+      return "edit";
+    default:
+      return "noAccess";
+  }
+}
+
+function mapUserPermission(
+  permission: tagmanager_v2.Schema$UserPermission,
+): GtmUserPermission | null {
+  const emailAddress = permission.emailAddress?.trim();
+  if (!emailAddress) return null;
+
+  return {
+    emailAddress: emailAddress.toLowerCase(),
+    accountAccess: {
+      permission: normalizeAccountPermission(permission.accountAccess?.permission),
+    },
+    containerAccess: (permission.containerAccess ?? [])
+      .map((access) => {
+        const containerId = access.containerId?.trim();
+        if (!containerId) return null;
+
+        return {
+          containerId,
+          permission: normalizeContainerPermission(access.permission),
+        };
+      })
+      .filter((access): access is GtmContainerAccess => access !== null),
+  };
+}
+
+async function handlePermissionLookupError(err: unknown, operation: string): Promise<never> {
+  const error = err as {
+    response?: { status?: number };
+  };
+
+  if (error.response?.status === 403) {
+    throw new TagOpsError({
+      code: ErrorCode.API_FORBIDDEN,
+      message: "Unable to inspect GTM user permissions with the current credentials.",
+      suggestion:
+        "Re-run `tagops auth login` to grant the latest scopes, including `tagmanager.manage.users`, or ask an Account Admin to verify your GTM access.",
+      cause: err,
+    });
+  }
+
+  return handleApiError(err, operation);
+}
+
+export function isPermissionLookupError(err: unknown): boolean {
+  return (
+    err instanceof TagOpsError &&
+    err.code === ErrorCode.API_FORBIDDEN &&
+    err.message.includes("inspect GTM user permissions")
+  );
+}
+
+export async function listUserPermissions(profileName?: string): Promise<GtmUserPermission[]> {
+  try {
+    const parent = getAccountPath(profileName);
+    const cacheKey = `userPermissions:${parent}`;
+    const cached = getCached<GtmUserPermission[]>(cacheKey);
+    if (cached) return cached;
+
+    const gtm = await getGtmClient();
+    const permissions: GtmUserPermission[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.user_permissions.list({
+          parent,
+          pageToken,
+        }),
+      );
+
+      permissions.push(
+        ...(res.data.userPermission ?? [])
+          .map((permission) => mapUserPermission(permission))
+          .filter((permission): permission is GtmUserPermission => permission !== null),
+      );
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    setCache(cacheKey, permissions);
+    return permissions;
+  } catch (err) {
+    return handlePermissionLookupError(err, "listUserPermissions");
+  }
+}
+
+export async function getCurrentUserPermission(
+  profileName?: string,
+): Promise<GtmUserPermission | null> {
+  const emailAddress = await getCurrentAuthenticatedEmail();
+  if (!emailAddress) return null;
+
+  const permissions = await listUserPermissions(profileName);
+  return permissions.find((permission) => permission.emailAddress === emailAddress) ?? null;
+}
+
+export function getEffectiveContainerPermission(
+  permission: GtmUserPermission,
+  containerId = loadConfig().containerId,
+): GtmContainerPermission {
+  const directPermission = permission.containerAccess.find(
+    (access) => access.containerId === containerId,
+  )?.permission;
+
+  if (directPermission) return directPermission;
+
+  if (
+    permission.accountAccess.permission === "admin" ||
+    permission.accountAccess.permission === "read"
+  ) {
+    return "read";
+  }
+
+  return "noAccess";
+}
+
+export async function checkWriteAccess(profileName?: string): Promise<boolean> {
+  try {
+    const permission = await getCurrentUserPermission(profileName);
+    if (!permission) return false;
+
+    const effectivePermission = getEffectiveContainerPermission(
+      permission,
+      loadConfig(profileName).containerId,
+    );
+    return (
+      effectivePermission === "edit" ||
+      effectivePermission === "approve" ||
+      effectivePermission === "publish"
+    );
+  } catch (err) {
+    if (isPermissionLookupError(err)) return false;
+    throw err;
+  }
+}
+
+export async function checkPublishAccess(profileName?: string): Promise<boolean> {
+  try {
+    const permission = await getCurrentUserPermission(profileName);
+    if (!permission) return false;
+
+    return (
+      getEffectiveContainerPermission(permission, loadConfig(profileName).containerId) === "publish"
+    );
+  } catch (err) {
+    if (isPermissionLookupError(err)) return false;
+    throw err;
+  }
 }
 
 export async function listWorkspaces(): Promise<Array<{ workspaceId: string; name: string }>> {
@@ -153,6 +383,125 @@ export async function listWorkspaces(): Promise<Array<{ workspaceId: string; nam
   }
 }
 
+export interface WorkspaceStatus {
+  synced: boolean;
+  mergeConflict: tagmanager_v2.Schema$MergeConflict[];
+  workspaceChange: tagmanager_v2.Schema$Entity[];
+}
+
+export type WorkspaceConflictResolution =
+  | { tag: GtmTag | tagmanager_v2.Schema$Tag }
+  | { trigger: GtmTrigger | tagmanager_v2.Schema$Trigger }
+  | { variable: GtmVariable | tagmanager_v2.Schema$Variable };
+
+export async function getWorkspaceStatus(): Promise<WorkspaceStatus> {
+  try {
+    const path = getWorkspacePath();
+    const gtm = await getGtmClient();
+    const res = await withRetry(() => gtm.accounts.containers.workspaces.getStatus({ path }));
+    const mergeConflict = res.data.mergeConflict ?? [];
+    const workspaceChange = res.data.workspaceChange ?? [];
+
+    return {
+      synced: mergeConflict.length === 0 && workspaceChange.length === 0,
+      mergeConflict,
+      workspaceChange,
+    };
+  } catch (err) {
+    return handleApiError(err, "getWorkspaceStatus");
+  }
+}
+
+export async function syncWorkspace(): Promise<tagmanager_v2.Schema$SyncWorkspaceResponse> {
+  try {
+    const path = getWorkspacePath();
+    const gtm = await getGtmClient();
+    const res = await withRetry(() => gtm.accounts.containers.workspaces.sync({ path }));
+    apiCache.clear();
+    return res.data;
+  } catch (err) {
+    return handleApiError(err, "syncWorkspace");
+  }
+}
+
+export async function resolveWorkspaceConflict(
+  entity: WorkspaceConflictResolution,
+  fingerprint?: string,
+): Promise<boolean> {
+  try {
+    const path = getWorkspacePath();
+    const gtm = await getGtmClient();
+    const requestBody: tagmanager_v2.Schema$Entity =
+      "tag" in entity
+        ? { tag: entity.tag as tagmanager_v2.Schema$Tag }
+        : "trigger" in entity
+          ? { trigger: entity.trigger as tagmanager_v2.Schema$Trigger }
+          : { variable: entity.variable as tagmanager_v2.Schema$Variable };
+
+    await withRetry(() =>
+      gtm.accounts.containers.workspaces.resolve_conflict({
+        path,
+        fingerprint,
+        requestBody,
+      }),
+    );
+
+    apiCache.clear();
+    return true;
+  } catch (err) {
+    return handleApiError(err, "resolveWorkspaceConflict");
+  }
+}
+
+export async function createWorkspace(
+  name: string,
+  description?: string,
+): Promise<tagmanager_v2.Schema$Workspace> {
+  if (!name)
+    throw new TagOpsError({
+      code: ErrorCode.VALIDATION_FAILED,
+      message: "Workspace name is required",
+    });
+
+  try {
+    const parent = getContainerPath();
+    const gtm = await getGtmClient();
+    const requestBody: tagmanager_v2.Schema$Workspace = { name };
+    if (description) requestBody.description = description;
+
+    const res = await withRetry(() =>
+      gtm.accounts.containers.workspaces.create({
+        parent,
+        requestBody,
+      }),
+    );
+
+    apiCache.clear();
+    return res.data;
+  } catch (err) {
+    return handleApiError(err, "createWorkspace");
+  }
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<boolean> {
+  if (!workspaceId) return false;
+
+  try {
+    const config = loadConfig();
+    const path = `accounts/${config.accountId}/containers/${config.containerId}/workspaces/${workspaceId}`;
+    const gtm = await getGtmClient();
+
+    await withRetry(() => gtm.accounts.containers.workspaces.delete({ path }));
+
+    apiCache.clear();
+    return true;
+  } catch (err: unknown) {
+    const error = err as { response?: { status?: number } };
+    if (error.response?.status === 404) return false;
+    return handleApiError(err, "deleteWorkspace");
+  }
+}
+
 interface CacheEntry<T> {
   data: T;
   timestamp: number;
@@ -176,6 +525,24 @@ export function clearApiCache(): void {
 }
 
 // ── Typed resource accessors ──
+
+export async function getContainer(): Promise<GtmContainerMetadata> {
+  try {
+    const path = getContainerPath();
+    const cacheKey = `container:${path}`;
+    const cached = getCached<GtmContainerMetadata>(cacheKey);
+    if (cached) return cached;
+
+    const gtm = await getGtmClient();
+    const res = await withRetry(() => gtm.accounts.containers.get({ path }));
+    const container = res.data as GtmContainerMetadata;
+
+    setCache(cacheKey, container);
+    return container;
+  } catch (err) {
+    return handleApiError(err, "getContainer");
+  }
+}
 
 export async function listTags(): Promise<GtmTag[]> {
   try {
@@ -299,6 +666,68 @@ export async function listVariables(): Promise<GtmVariable[]> {
   }
 }
 
+export async function listClients(): Promise<GtmClient[]> {
+  try {
+    const parent = getWorkspacePath();
+    const cacheKey = `clients:${parent}`;
+    const cached = getCached<GtmClient[]>(cacheKey);
+    if (cached) return cached;
+
+    const gtm = await getGtmClient();
+    const allClients: GtmClient[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.containers.workspaces.clients.list({
+          parent,
+          pageToken,
+        }),
+      );
+      const clients = (res.data.client as GtmClient[]) || [];
+      allClients.push(...clients);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    setCache(cacheKey, allClients);
+    return allClients;
+  } catch (err) {
+    if (isUnsupportedWorkspaceFeatureError(err)) return [];
+    return handleApiError(err, "listClients");
+  }
+}
+
+export async function listTransformations(): Promise<GtmTransformation[]> {
+  try {
+    const parent = getWorkspacePath();
+    const cacheKey = `transformations:${parent}`;
+    const cached = getCached<GtmTransformation[]>(cacheKey);
+    if (cached) return cached;
+
+    const gtm = await getGtmClient();
+    const allTransformations: GtmTransformation[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const res = await withRetry(() =>
+        gtm.accounts.containers.workspaces.transformations.list({
+          parent,
+          pageToken,
+        }),
+      );
+      const transformations = (res.data.transformation as GtmTransformation[]) || [];
+      allTransformations.push(...transformations);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    setCache(cacheKey, allTransformations);
+    return allTransformations;
+  } catch (err) {
+    if (isUnsupportedWorkspaceFeatureError(err)) return [];
+    return handleApiError(err, "listTransformations");
+  }
+}
+
 export async function listFolders(): Promise<GtmFolder[]> {
   try {
     const parent = getWorkspacePath();
@@ -386,6 +815,98 @@ export async function listEnvironments(): Promise<GtmEnvironment[]> {
     return allEnvironments;
   } catch (err) {
     return handleApiError(err, "listEnvironments");
+  }
+}
+
+// ── Folder operations ──
+
+export async function createFolder(
+  name: string,
+  config: Record<string, unknown>,
+): Promise<GtmFolder | null> {
+  if (!name)
+    throw new TagOpsError({
+      code: ErrorCode.VALIDATION_FAILED,
+      message: "Folder name is required",
+    });
+
+  try {
+    const parent = getWorkspacePath();
+    const gtm = await getGtmClient();
+    const existingNotes = config.notes ? String(config.notes) : "";
+    const hasUUID = existingNotes.includes("TagOps-ID:");
+    const uuid = hasUUID ? "" : crypto.randomUUID();
+    const notesValue = hasUUID
+      ? existingNotes
+      : `${existingNotes}${existingNotes ? "\n" : ""}TagOps-ID: ${uuid}`;
+    const requestBody: Record<string, unknown> = {
+      name,
+      ...config,
+      notes: notesValue,
+    };
+
+    const res = await withRetry(() =>
+      gtm.accounts.containers.workspaces.folders.create({
+        parent,
+        requestBody,
+      }),
+    );
+
+    apiCache.clear();
+    return res.data as GtmFolder;
+  } catch (err: unknown) {
+    const error = err as {
+      response?: { status?: number; data?: { error?: { message?: string } } };
+    };
+    if (
+      error.response?.status === 400 &&
+      error.response?.data?.error?.message?.toLowerCase().includes("duplicate name")
+    ) {
+      console.warn(`  [Skipped] Folder already exists: "${name}"`);
+      const reqPath = getWorkspacePath();
+      const gtm = await getGtmClient();
+      const listRes = await withRetry(() =>
+        gtm.accounts.containers.workspaces.folders.list({ parent: reqPath }),
+      );
+      const existing = listRes.data.folder?.find((folder: any) => folder.name === name);
+      if (existing) {
+        return existing as GtmFolder;
+      }
+    }
+    return handleApiError(err, "createFolder");
+  }
+}
+
+export async function updateFolder(
+  folderId: string,
+  requestBody: Record<string, unknown>,
+): Promise<GtmFolder | null> {
+  if (!folderId)
+    throw new TagOpsError({
+      code: ErrorCode.VALIDATION_FAILED,
+      message: "Folder ID is required",
+    });
+
+  try {
+    const parent = getWorkspacePath();
+    const gtm = await getGtmClient();
+    const path = `${parent}/folders/${folderId}`;
+
+    const current = await withRetry(() => gtm.accounts.containers.workspaces.folders.get({ path }));
+    const fingerprint = current.data.fingerprint ?? undefined;
+
+    const res = await withRetry(() =>
+      gtm.accounts.containers.workspaces.folders.update({
+        path,
+        fingerprint,
+        requestBody,
+      }),
+    );
+
+    apiCache.clear();
+    return res.data as GtmFolder;
+  } catch (err) {
+    return handleApiError(err, "updateFolder");
   }
 }
 
@@ -769,29 +1290,77 @@ export async function updateTrigger(
 
 // ── Version operations ──
 
-export interface GtmVersionInfo {
-  containerVersionId: string;
-  name: string;
-  description?: string;
-  fingerprint?: string;
-}
+export type GtmVersionInfo = GtmVersionHeader;
 
 export interface GtmSyncStatus {
   mergeConflict?: boolean | null;
   syncError?: boolean | null;
 }
 
-export interface GtmCreateVersionResult extends Partial<GtmVersionInfo> {
+export interface GtmCreateVersionResult extends Partial<GtmVersionHeader> {
   compilerError?: boolean | null;
   syncStatus?: GtmSyncStatus;
 }
 
-export async function listVersions(): Promise<GtmVersionInfo[]> {
+type GtmVersionResource = Partial<GtmVersionHeader> & {
+  tag?: unknown[];
+  trigger?: unknown[];
+  variable?: unknown[];
+};
+
+function getVersionPath(versionId: string): string {
+  return `${getContainerPath()}/versions/${versionId}`;
+}
+
+function getVersionCount(
+  count: string | null | undefined,
+  items: unknown[] | undefined,
+): string | undefined {
+  if (count != null) return count;
+  if (items !== undefined) return String(items.length);
+  return undefined;
+}
+
+function normalizeVersionHeader(
+  version: GtmVersionResource | undefined,
+  fallback: Partial<Pick<GtmVersionHeader, "containerVersionId" | "name" | "path">> = {},
+): GtmVersionHeader | null {
+  const containerVersionId = version?.containerVersionId ?? fallback.containerVersionId;
+  if (!containerVersionId) return null;
+
+  return {
+    containerVersionId,
+    name: version?.name ?? fallback.name ?? `Version ${containerVersionId}`,
+    description: version?.description ?? undefined,
+    numTags: getVersionCount(version?.numTags, version?.tag),
+    numTriggers: getVersionCount(version?.numTriggers, version?.trigger),
+    numVariables: getVersionCount(version?.numVariables, version?.variable),
+    deleted: version?.deleted ?? undefined,
+    fingerprint: version?.fingerprint ?? undefined,
+    path: version?.path ?? fallback.path ?? getVersionPath(containerVersionId),
+  };
+}
+
+function compareVersionsDescending(a: GtmVersionHeader, b: GtmVersionHeader): number {
+  const aId = Number.parseInt(a.containerVersionId, 10);
+  const bId = Number.parseInt(b.containerVersionId, 10);
+
+  if (Number.isFinite(aId) && Number.isFinite(bId) && aId !== bId) {
+    return bId - aId;
+  }
+
+  return b.containerVersionId.localeCompare(a.containerVersionId, undefined, { numeric: true });
+}
+
+export async function listVersions(): Promise<GtmVersionHeader[]> {
   try {
-    const config = loadConfig();
-    const parent = `accounts/${config.accountId}/containers/${config.containerId}`;
+    const parent = getContainerPath();
+    const cacheKey = `versions:${parent}`;
+    const cached = getCached<GtmVersionHeader[]>(cacheKey);
+    if (cached) return cached;
+
     const gtm = await getGtmClient();
-    const versions: GtmVersionInfo[] = [];
+    const versions: GtmVersionHeader[] = [];
     let pageToken: string | undefined;
 
     do {
@@ -799,13 +1368,18 @@ export async function listVersions(): Promise<GtmVersionInfo[]> {
         gtm.accounts.containers.version_headers.list({ parent, pageToken }),
       );
       const data = res.data as {
-        containerVersionHeader?: GtmVersionInfo[];
+        containerVersionHeader?: GtmVersionResource[];
         nextPageToken?: string | null;
       };
-      versions.push(...(data.containerVersionHeader ?? []));
+      for (const header of data.containerVersionHeader ?? []) {
+        const normalized = normalizeVersionHeader(header);
+        if (normalized) versions.push(normalized);
+      }
       pageToken = data.nextPageToken ?? undefined;
     } while (pageToken);
 
+    versions.sort(compareVersionsDescending);
+    setCache(cacheKey, versions);
     return versions;
   } catch (err) {
     return handleApiError(err, "listVersions");
@@ -836,7 +1410,9 @@ export async function createVersion(
       }),
     );
 
-    const containerVersion = res.data.containerVersion as GtmVersionInfo | undefined;
+    const containerVersion = normalizeVersionHeader(
+      res.data.containerVersion as GtmVersionResource,
+    );
     return {
       ...(containerVersion ?? {}),
       compilerError: res.data.compilerError ?? undefined,
@@ -851,14 +1427,68 @@ export async function publishVersion(versionId: string): Promise<boolean> {
   if (!versionId || versionId === "unknown") return false;
 
   try {
-    const config = loadConfig();
-    const path = `accounts/${config.accountId}/containers/${config.containerId}/versions/${versionId}`;
+    const path = getVersionPath(versionId);
     const gtm = await getGtmClient();
 
-    await gtm.accounts.containers.versions.publish({ path });
+    await withRetry(() => gtm.accounts.containers.versions.publish({ path }));
+    apiCache.clear();
     return true;
   } catch (err) {
     return handleApiError(err, "publishVersion");
+  }
+}
+
+export async function getVersionDetails(versionId: string): Promise<GtmVersionHeader | null> {
+  if (!versionId || versionId.trim().length === 0) return null;
+
+  try {
+    const path = getVersionPath(versionId);
+    const gtm = await getGtmClient();
+    const res = await withRetry(() => gtm.accounts.containers.versions.get({ path }));
+    return normalizeVersionHeader(res.data as GtmVersionResource, {
+      containerVersionId: versionId,
+      path,
+    });
+  } catch (err: unknown) {
+    const error = err as { response?: { status?: number } };
+    if (error.response?.status === 404) return null;
+    return handleApiError(err, "getVersionDetails");
+  }
+}
+
+export async function rollbackToVersion(versionId: string): Promise<GtmVersionHeader | null> {
+  if (!versionId || versionId.trim().length === 0 || versionId === "unknown") return null;
+
+  try {
+    const path = getVersionPath(versionId);
+    const gtm = await getGtmClient();
+    const res = await withRetry(() => gtm.accounts.containers.versions.publish({ path }));
+    apiCache.clear();
+
+    const publishedVersion = normalizeVersionHeader(
+      res.data.containerVersion as GtmVersionResource,
+      {
+        containerVersionId: versionId,
+        path,
+      },
+    );
+
+    return publishedVersion ?? (await getVersionDetails(versionId));
+  } catch (err) {
+    return handleApiError(err, "rollbackToVersion");
+  }
+}
+
+export async function getLatestPublishedVersion(): Promise<GtmVersionHeader | null> {
+  try {
+    const parent = getContainerPath();
+    const gtm = await getGtmClient();
+    const res = await withRetry(() => gtm.accounts.containers.versions.live({ parent }));
+    return normalizeVersionHeader(res.data as GtmVersionResource);
+  } catch (err: unknown) {
+    const error = err as { response?: { status?: number } };
+    if (error.response?.status === 404) return null;
+    return handleApiError(err, "getLatestPublishedVersion");
   }
 }
 

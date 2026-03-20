@@ -10,9 +10,12 @@ vi.mock("../lib/gtm-cli.js", () => ({
     ...(structuredClone(tag) as Record<string, unknown>),
     ...overrides,
   })),
+  listFolders: vi.fn(),
   listTags: vi.fn(),
   listTriggers: vi.fn(),
   listVariables: vi.fn(),
+  createFolder: vi.fn(),
+  updateFolder: vi.fn(),
   createTag: vi.fn(),
   updateTag: vi.fn(),
   deleteTag: vi.fn(),
@@ -28,6 +31,11 @@ vi.mock("../lib/gtm-cli.js", () => ({
 // Mock architecture to provide BUILTIN_TRIGGER_IDS
 vi.mock("../lib/architecture.js", () => ({
   BUILTIN_TRIGGER_IDS: new Set(),
+}));
+
+vi.mock("../lib/permission-guard.js", () => ({
+  requireWriteAccess: vi.fn(),
+  requirePublishAccess: vi.fn(),
 }));
 
 describe("GTM Cycle Integration Test (Snapshot → Mutate → Restore)", () => {
@@ -57,6 +65,7 @@ describe("GTM Cycle Integration Test (Snapshot → Mutate → Restore)", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    (gtmCli.listFolders as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   });
 
   afterEach(() => {

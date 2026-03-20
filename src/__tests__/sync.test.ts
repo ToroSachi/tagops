@@ -33,6 +33,11 @@ vi.mock("../lib/gtm-cli.js", () => ({
   getGtmClient,
 }));
 
+vi.mock("../lib/permission-guard.js", () => ({
+  requireWriteAccess: vi.fn(),
+  requirePublishAccess: vi.fn(),
+}));
+
 describe("mapVariablesInTrigger", () => {
   it("maps nested template values across trigger payloads", async () => {
     const { mapVariablesInTrigger } = await import("../tools/sync.js");

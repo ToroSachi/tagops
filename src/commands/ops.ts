@@ -107,10 +107,11 @@ export function registerOpsCommands(program: Command) {
   program
     .command("init-ci")
     .description("Scaffold GitHub Actions workflows for GTM CI/CD (linting, diffs, deploys)")
-    .action(async () => {
+    .option("--branch <name>", "Target branch for pull requests and deploys", "main")
+    .action(async (opts: { branch?: string }) => {
       const { initCi, printInitCiReport } = await import("../tools/init-ci.js");
       try {
-        const report = initCi();
+        const report = initCi({ branch: opts.branch });
         if (program.opts().json) {
           console.log(JSON.stringify(report, null, 2));
         } else {
@@ -190,10 +191,11 @@ export function registerOpsCommands(program: Command) {
 
   program
     .command("watch")
-    .description("Run a background daemon to monitor the GTM workspace for undocumented drift")
+    .description("Run a background daemon to monitor the GTM workspace for semantic drift")
     .option("--interval <minutes>", "Polling interval in minutes", "5")
     .option("--webhook <url>", "Webhook URL to notify on drift")
-    .action(async (opts: { interval: string; webhook?: string }) => {
+    .option("--managed-only", "Only alert when TagOps-managed resources drift")
+    .action(async (opts: { interval: string; webhook?: string; managedOnly?: boolean }) => {
       const { runWatchDaemon } = await import("../tools/watch.js");
       const interval = parseFloat(opts.interval);
       if (isNaN(interval) || interval <= 0) {
@@ -203,7 +205,27 @@ export function registerOpsCommands(program: Command) {
         process.exit(1);
       }
       try {
-        await runWatchDaemon(interval, opts.webhook);
+        await runWatchDaemon(interval, opts.webhook, { managedOnly: opts.managedOnly ?? false });
+      } catch (err) {
+        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        process.exit(1);
+      }
+    });
+
+  program
+    .command("drift <snapshot>")
+    .description(
+      "Compare a saved snapshot against the live workspace using semantic drift detection",
+    )
+    .action(async (snapshot: string) => {
+      const { detectDrift, printDriftReport } = await import("../tools/drift.js");
+      try {
+        const report = await detectDrift(snapshot);
+        if (program.opts().json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          printDriftReport(report);
+        }
       } catch (err) {
         console.error(chalk.red(`\n✖ ${(err as Error).message}`));
         process.exit(1);

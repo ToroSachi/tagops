@@ -9,6 +9,7 @@ import chalk from "chalk";
 import { buildCompleteTagConfig, buildConsentConfig, getTag, updateTag } from "../lib/gtm-cli.js";
 import { isLightweightPixel } from "../lib/architecture.js";
 import { createPreFixBackup } from "../lib/pre-fix-backup.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 
 const DEFAULT_CONSENT_TYPE = "ad_storage";
 
@@ -31,6 +32,8 @@ export async function fixConsent(
       "No tag IDs provided. Use --tag-ids 6,115,116 to specify which tags to update.",
     );
   }
+
+  await requireWriteAccess();
 
   const results: FixConsentResult[] = [];
 

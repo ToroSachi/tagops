@@ -12,6 +12,7 @@
 
 import chalk from "chalk";
 import { createVersion, publishVersion, listVersions } from "../lib/gtm-cli.js";
+import { requirePublishAccess, requireWriteAccess } from "../lib/permission-guard.js";
 import type { GtmSyncStatus } from "../lib/gtm-cli.js";
 
 export interface VersionInfo {
@@ -78,6 +79,11 @@ export async function runPublish(opts: {
 
   if (opts.dryRun) {
     return result;
+  }
+
+  await requireWriteAccess();
+  if (opts.confirm) {
+    await requirePublishAccess();
   }
 
   // Step 1: Create the version

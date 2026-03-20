@@ -21,6 +21,7 @@ import {
   deleteVariable,
 } from "../lib/gtm-cli.js";
 import { BUILTIN_TRIGGER_IDS } from "../lib/architecture.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 import type { GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 export interface CleanupReport {
@@ -92,6 +93,8 @@ export async function scanForCleanup(): Promise<CleanupReport> {
  * Interactive prompt to confirm deletion of unused resources.
  */
 export async function runInteractiveCleanup(report: CleanupReport): Promise<void> {
+  await requireWriteAccess();
+
   const { unusedVariables, orphanedTriggers, pausedTags } = report;
 
   console.log(chalk.bold("\n=== GTM Workspace Cleanup ===\n"));

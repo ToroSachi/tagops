@@ -18,6 +18,7 @@ import {
   VARIABLE_MAP,
   discoverTriggerByEvent,
 } from "../lib/architecture.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 
 // ── Template types ──
 
@@ -1071,6 +1072,47 @@ function getTemplates(): IntegrationTemplate[] {
   ];
 }
 
+function normalizeLookupValue(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function scoreTemplateLookup(template: IntegrationTemplate, lookup: string): number {
+  const normalizedLookup = normalizeLookupValue(lookup);
+  if (!normalizedLookup) {
+    return 0;
+  }
+
+  let bestScore = 0;
+  for (const candidate of [template.id, template.name, template.vendor, template.description]) {
+    const normalizedCandidate = normalizeLookupValue(candidate);
+    if (!normalizedCandidate) {
+      continue;
+    }
+
+    if (normalizedCandidate === normalizedLookup) {
+      bestScore = Math.max(bestScore, 100);
+      continue;
+    }
+
+    if (
+      normalizedCandidate.startsWith(normalizedLookup) ||
+      normalizedLookup.startsWith(normalizedCandidate)
+    ) {
+      bestScore = Math.max(bestScore, 90);
+      continue;
+    }
+
+    if (
+      normalizedCandidate.includes(normalizedLookup) ||
+      normalizedLookup.includes(normalizedCandidate)
+    ) {
+      bestScore = Math.max(bestScore, 80);
+    }
+  }
+
+  return bestScore;
+}
+
 // ── Public API ──
 
 export function listTemplates(): TemplateInfo[] {
@@ -1082,6 +1124,21 @@ export function listTemplates(): TemplateInfo[] {
     category: t.category,
     requiredInputs: t.requiredInputs,
   }));
+}
+
+export function findTemplateIdByVendor(vendorName: string): string | null {
+  let bestTemplate: IntegrationTemplate | null = null;
+  let bestScore = 0;
+
+  for (const template of getTemplates()) {
+    const score = scoreTemplateLookup(template, vendorName);
+    if (score > bestScore) {
+      bestTemplate = template;
+      bestScore = score;
+    }
+  }
+
+  return bestTemplate?.id ?? null;
 }
 
 export function printTemplateList(templates: TemplateInfo[]): void {
@@ -1107,6 +1164,10 @@ export async function installTemplate(
   templateId: string,
   options: InstallOptions,
 ): Promise<InstallResult> {
+  if (!options.dryRun) {
+    await requireWriteAccess();
+  }
+
   const templates = getTemplates();
   const template = templates.find((t) => t.id === templateId);
 
@@ -1371,6 +1432,8 @@ export interface ValidationIssue {
   type: "missing" | "html_mismatch" | "consent_mismatch" | "trigger_mismatch" | "extra_tag";
   expected?: string;
   actual?: string;
+  detail?: string;
+  recommendation?: string;
 }
 
 export interface ValidationResult {
@@ -1389,7 +1452,7 @@ export function validateInstalledTags(
     type: string;
     html?: string;
     consentType?: string;
-    triggerEvent?: string;
+    triggerEvent?: string | string[];
   }>,
   options: { pixelId?: string; measurementId?: string } = {},
 ): ValidationResult {
@@ -1407,55 +1470,159 @@ export function validateInstalledTags(
 
   const expectedTags = template.tags(inputs);
   const issues: ValidationIssue[] = [];
+  const matchedInstalledIndexes = new Set<number>();
   let matched = 0;
 
+  const normalizeHtml = (html?: string): string =>
+    (html ?? "").replace(/\r\n/g, "\n").replace(/\s+/g, " ").trim();
+
+  const summarizeHtml = (html?: string): string => {
+    const normalized = normalizeHtml(html);
+    if (!normalized) {
+      return "none";
+    }
+    return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
+  };
+
+  const normalizeTagName = (name: string): string =>
+    name
+      .toLowerCase()
+      .replace(/[–—]/g, "-")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+
+  const normalizeTriggerEvents = (triggerEvent?: string | string[]): string[] => {
+    const events = Array.isArray(triggerEvent) ? triggerEvent : triggerEvent ? [triggerEvent] : [];
+    return [...new Set(events.filter(Boolean))];
+  };
+
+  const formatTriggerEvents = (triggerEvent?: string | string[]): string => {
+    const events = normalizeTriggerEvents(triggerEvent);
+    if (events.length === 0) {
+      return "none";
+    }
+
+    return events.map((event) => getTriggerDisplayName(event)).join(", ");
+  };
+
+  const findInstalledTagIndex = (expectedName: string): number => {
+    const normalizedExpected = normalizeTagName(expectedName);
+
+    return installedTags.findIndex((tag, index) => {
+      if (matchedInstalledIndexes.has(index)) {
+        return false;
+      }
+
+      const normalizedInstalled = normalizeTagName(tag.name);
+      return (
+        normalizedInstalled === normalizedExpected ||
+        normalizedInstalled.includes(normalizedExpected) ||
+        normalizedExpected.includes(normalizedInstalled)
+      );
+    });
+  };
+
   for (const expected of expectedTags) {
-    const installed = installedTags.find(
-      (t) => t.name === expected.name || t.name.includes(expected.name),
-    );
+    const installedIndex = findInstalledTagIndex(expected.name);
+    const installed = installedIndex >= 0 ? installedTags[installedIndex] : undefined;
 
     if (!installed) {
       issues.push({
         tagName: expected.name,
         type: "missing",
-        expected: "Tag should exist",
+        expected: `Install ${expected.name} on ${getTriggerDisplayName(expected.triggerEvent)}`,
         actual: "Not found",
+        detail: `${expected.name} is defined by the ${template.name} template but is missing from the container.`,
+        recommendation: `Reinstall the template or recreate this tag on ${getTriggerDisplayName(expected.triggerEvent)}.`,
       });
       continue;
     }
 
-    matched++;
+    matchedInstalledIndexes.add(installedIndex);
+    let tagMatchesTemplate = true;
+
+    if (expected.type === "html" && installed.html !== undefined && normalizeHtml(expected.html)) {
+      const expectedHtml = normalizeHtml(expected.html);
+      const actualHtml = normalizeHtml(installed.html);
+      if (expectedHtml !== actualHtml) {
+        tagMatchesTemplate = false;
+        issues.push({
+          tagName: expected.name,
+          type: "html_mismatch",
+          expected: summarizeHtml(expected.html),
+          actual: summarizeHtml(installed.html),
+          detail: `${expected.name} exists, but its Custom HTML no longer matches the template definition.`,
+          recommendation:
+            "Replace the installed HTML with the template HTML or reinstall the template.",
+        });
+      }
+    }
 
     // Check consent
     if (expected.consentType && installed.consentType !== expected.consentType) {
+      tagMatchesTemplate = false;
       issues.push({
         tagName: expected.name,
         type: "consent_mismatch",
         expected: expected.consentType,
         actual: installed.consentType ?? "none",
+        detail: `${expected.name} should require ${expected.consentType}, but the installed tag is configured for ${installed.consentType ?? "no consent type"}.`,
+        recommendation: `Update the tag consent settings to require ${expected.consentType}.`,
+      });
+    }
+
+    if (installed.triggerEvent !== undefined) {
+      const expectedTriggerEvents = normalizeTriggerEvents(expected.triggerEvent);
+      const actualTriggerEvents = normalizeTriggerEvents(installed.triggerEvent);
+      const triggersMatch =
+        expectedTriggerEvents.length === actualTriggerEvents.length &&
+        expectedTriggerEvents.every((event) => actualTriggerEvents.includes(event));
+
+      if (!triggersMatch) {
+        tagMatchesTemplate = false;
+        issues.push({
+          tagName: expected.name,
+          type: "trigger_mismatch",
+          expected: formatTriggerEvents(expected.triggerEvent),
+          actual: formatTriggerEvents(installed.triggerEvent),
+          detail: `${expected.name} should fire on ${getTriggerDisplayName(expected.triggerEvent)}, but the installed firing trigger is ${formatTriggerEvents(installed.triggerEvent)}.`,
+          recommendation: `Attach the tag to ${getTriggerDisplayName(expected.triggerEvent)} and remove incorrect triggers.`,
+        });
+      }
+    }
+
+    if (tagMatchesTemplate) {
+      matched++;
+    }
+  }
+
+  for (const [index, installed] of installedTags.entries()) {
+    if (matchedInstalledIndexes.has(index)) {
+      continue;
+    }
+
+    const vendorLower = template.vendor.toLowerCase();
+    if (installed.name.toLowerCase().includes(vendorLower)) {
+      issues.push({
+        tagName: installed.name,
+        type: "extra_tag",
+        expected: "Not in template",
+        actual: "Found in container",
+        detail: `${installed.name} looks like a ${template.vendor} tag, but it is not part of the ${template.name} template.`,
+        recommendation: `Remove, pause, or rename ${installed.name} if it is a legacy tag.`,
       });
     }
   }
 
-  // Check for extra tags that shouldn't be there
-  const expectedNames = new Set(expectedTags.map((t) => t.name));
-  for (const installed of installedTags) {
-    if (!expectedNames.has(installed.name)) {
-      // Only flag if the tag name contains the template vendor
-      const vendorLower = template.vendor.toLowerCase();
-      if (installed.name.toLowerCase().includes(vendorLower)) {
-        issues.push({
-          tagName: installed.name,
-          type: "extra_tag",
-          expected: "Not in template",
-          actual: "Found in container",
-        });
-      }
-    }
-  }
-
   const status =
-    issues.length === 0 ? "pass" : issues.some((i) => i.type === "missing") ? "fail" : "warn";
+    issues.length === 0
+      ? "pass"
+      : issues.some(
+            (i) =>
+              i.type === "missing" || i.type === "html_mismatch" || i.type === "trigger_mismatch",
+          )
+        ? "fail"
+        : "warn";
 
   return {
     templateId,
@@ -1494,6 +1661,12 @@ export function printValidationResult(result: ValidationResult): void {
     console.log(
       `    ${chalk.gray(issue.type)}: expected=${issue.expected ?? "—"}, actual=${issue.actual ?? "—"}`,
     );
+    if (issue.detail) {
+      console.log(`    ${chalk.gray(issue.detail)}`);
+    }
+    if (issue.recommendation) {
+      console.log(`    ${chalk.cyan(issue.recommendation)}`);
+    }
   }
   console.log();
 }

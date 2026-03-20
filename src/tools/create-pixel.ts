@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import chalk from "chalk";
 import { createTag, buildHtmlTagConfig } from "../lib/gtm-cli.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 
 export interface PixelTagInput {
   name: string;
@@ -26,6 +27,10 @@ export interface CreatePixelResult {
 }
 
 export async function createPixelTags(pixels: PixelTagInput[]): Promise<CreatePixelResult[]> {
+  if (pixels.length > 0) {
+    await requireWriteAccess();
+  }
+
   const results: CreatePixelResult[] = [];
 
   for (const pixel of pixels) {

@@ -58,10 +58,84 @@ export function registerAuthCommands(program: Command) {
       if (status.authenticated) {
         console.log(`  Status: ${chalk.green("Authenticated")}`);
         console.log(`  Method: ${chalk.cyan(status.method)}\n`);
+        if (status.email) {
+          console.log(`  Email:  ${chalk.cyan(status.email)}\n`);
+        }
       } else {
         console.log(`  Status: ${chalk.red("Not Authenticated")}`);
         console.log(`  Error:  ${status.error || "No valid credentials found"}\n`);
         console.log(promptAuthLogin());
       }
+    });
+
+  authCmd
+    .command("whoami")
+    .description("Show the current authenticated Google identity and GTM permission level")
+    .action(async () => {
+      const { checkAuthStatus, getCurrentAuthenticatedEmail, promptAuthLogin } =
+        await import("../lib/auth.js");
+      const gtmCli = await import("../lib/gtm-cli.js");
+      const status = await checkAuthStatus();
+
+      if (!status.authenticated) {
+        console.log(chalk.bold("\n  Current Identity\n"));
+        console.log(`  Status: ${chalk.red("Not Authenticated")}`);
+        console.log(`  Error:  ${status.error || "No valid credentials found"}\n`);
+        console.log(promptAuthLogin());
+        process.exit(1);
+      }
+
+      const email = status.email ?? (await getCurrentAuthenticatedEmail()) ?? "unknown";
+      let permissionLabel = "unknown";
+      let note: string | undefined;
+
+      try {
+        const permission = await gtmCli.getCurrentUserPermission();
+        if (permission) {
+          const containerPermission = gtmCli.getEffectiveContainerPermission(permission);
+          permissionLabel = `account=${permission.accountAccess.permission}, container=${containerPermission}`;
+        } else {
+          note = "Current GTM user permission could not be matched to the authenticated identity.";
+        }
+      } catch (err) {
+        if (
+          typeof gtmCli.isPermissionLookupError === "function" &&
+          gtmCli.isPermissionLookupError(err)
+        ) {
+          note = "GTM user permissions could not be inspected with the current credentials.";
+        } else if (err instanceof Error && err.message.includes(".gtmrc.json")) {
+          note =
+            "Configure .gtmrc.json to inspect GTM container permissions for the current account.";
+        } else {
+          throw err;
+        }
+      }
+
+      if (program.opts().json) {
+        console.log(
+          JSON.stringify(
+            {
+              authenticated: true,
+              method: status.method,
+              email,
+              permission: permissionLabel,
+              note,
+            },
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+
+      console.log(chalk.bold("\n  Current Identity\n"));
+      console.log(`  Status:     ${chalk.green("Authenticated")}`);
+      console.log(`  Method:     ${chalk.cyan(status.method)}`);
+      console.log(`  Email:      ${chalk.cyan(email)}`);
+      console.log(`  Permission: ${chalk.cyan(permissionLabel)}`);
+      if (note) {
+        console.log(`  Note:       ${chalk.yellow(note)}`);
+      }
+      console.log();
     });
 }

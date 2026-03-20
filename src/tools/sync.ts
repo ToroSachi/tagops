@@ -19,6 +19,7 @@ import {
   updateTag,
   getGtmClient,
 } from "../lib/gtm-cli.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 import { compareContainers } from "./compare.js";
 import * as readline from "node:readline";
 
@@ -52,6 +53,7 @@ export interface SyncOptions {
   target: string;
   dryRun?: boolean;
   force?: boolean;
+  silent?: boolean;
 }
 
 export interface SyncResult {
@@ -237,7 +239,13 @@ function buildTagRequestBody(
 }
 
 export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
-  console.log(chalk.bold(`\n🔄 TagOps Sync — connecting to ${opts.source} → ${opts.target}...`));
+  const log = (...args: unknown[]) => {
+    if (!opts.silent) {
+      console.log(...args);
+    }
+  };
+
+  log(chalk.bold(`\n🔄 TagOps Sync — connecting to ${opts.source} → ${opts.target}...`));
 
   const [sourceState, targetState] = await Promise.all([
     fetchFullState(opts.source),
@@ -264,7 +272,7 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
     tagsToUpdate.length;
 
   if (totalActions === 0) {
-    console.log(chalk.green(`\n✔ ${opts.target} is already in sync with ${opts.source}.`));
+    log(chalk.green(`\n✔ ${opts.target} is already in sync with ${opts.source}.`));
     return {
       variablesCreated: 0,
       variablesUpdated: 0,
@@ -276,17 +284,13 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
     };
   }
 
-  console.log(chalk.yellow(`\nSync required (${totalActions} actions):`));
+  log(chalk.yellow(`\nSync required (${totalActions} actions):`));
   if (variablesToCreate.length || variablesToUpdate.length)
-    console.log(
-      `  Variables: ${variablesToCreate.length} create, ${variablesToUpdate.length} update`,
-    );
+    log(`  Variables: ${variablesToCreate.length} create, ${variablesToUpdate.length} update`);
   if (triggersToCreate.length || triggersToUpdate.length)
-    console.log(
-      `  Triggers:  ${triggersToCreate.length} create, ${triggersToUpdate.length} update`,
-    );
+    log(`  Triggers:  ${triggersToCreate.length} create, ${triggersToUpdate.length} update`);
   if (tagsToCreate.length || tagsToUpdate.length)
-    console.log(`  Tags:      ${tagsToCreate.length} create, ${tagsToUpdate.length} update`);
+    log(`  Tags:      ${tagsToCreate.length} create, ${tagsToUpdate.length} update`);
 
   if (!opts.force && !opts.dryRun) {
     if (!(await askConfirmation(`\nProceed with sync? (y/N): `))) {
@@ -303,7 +307,7 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
   }
 
   if (opts.dryRun) {
-    console.log(chalk.cyan("\n[DRY RUN] No changes made."));
+    log(chalk.cyan("\n[DRY RUN] No changes made."));
     return {
       variablesCreated: 0,
       variablesUpdated: 0,
@@ -314,6 +318,8 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
       errors: [],
     };
   }
+
+  await requireWriteAccess(opts.target);
 
   const result: SyncResult = {
     variablesCreated: 0,
@@ -330,7 +336,7 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
   const currentTargetTriggers = [...targetState.triggers];
 
   // 1. SYNC VARIABLES
-  console.log(chalk.bold(`\nSyncing Variables...`));
+  log(chalk.bold(`\nSyncing Variables...`));
   for (const diff of [...variablesToCreate, ...variablesToUpdate]) {
     try {
       const sourceVar = sourceState.variables.find((v) => v.variableId === diff.sourceId);
@@ -344,7 +350,7 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
         if (res) {
           currentTargetVariables.push(res);
           result.variablesCreated++;
-          console.log(`  ${chalk.green("+")} Created: ${sourceVar.name}`);
+          log(`  ${chalk.green("+")} Created: ${sourceVar.name}`);
         }
       } else {
         const res = await updateVariable(diff.targetId!, {
@@ -356,17 +362,17 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
           const idx = currentTargetVariables.findIndex((v) => v.variableId === diff.targetId);
           if (idx !== -1) currentTargetVariables[idx] = res;
           result.variablesUpdated++;
-          console.log(`  ${chalk.cyan("~")} Updated: ${sourceVar.name}`);
+          log(`  ${chalk.cyan("~")} Updated: ${sourceVar.name}`);
         }
       }
     } catch (err: any) {
       result.errors.push(err.message);
-      console.log(`  ${chalk.red("✖")} ${diff.name}: ${err.message}`);
+      log(`  ${chalk.red("✖")} ${diff.name}: ${err.message}`);
     }
   }
 
   // 2. SYNC TRIGGERS
-  console.log(chalk.bold(`\nSyncing Triggers...`));
+  log(chalk.bold(`\nSyncing Triggers...`));
   for (const diff of [...triggersToCreate, ...triggersToUpdate]) {
     try {
       const sourceTrigger = sourceState.triggers.find((t) => t.triggerId === diff.sourceId);
@@ -390,7 +396,7 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
         if (res) {
           currentTargetTriggers.push(res);
           result.triggersCreated++;
-          console.log(`  ${chalk.green("+")} Created: ${mappedTrigger.name}`);
+          log(`  ${chalk.green("+")} Created: ${mappedTrigger.name}`);
         }
       } else {
         const res = await updateTrigger(diff.targetId!, {
@@ -402,17 +408,17 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
           const idx = currentTargetTriggers.findIndex((t) => t.triggerId === diff.targetId);
           if (idx !== -1) currentTargetTriggers[idx] = res;
           result.triggersUpdated++;
-          console.log(`  ${chalk.cyan("~")} Updated: ${mappedTrigger.name}`);
+          log(`  ${chalk.cyan("~")} Updated: ${mappedTrigger.name}`);
         }
       }
     } catch (err: any) {
       result.errors.push(err.message);
-      console.log(`  ${chalk.red("✖")} Trigger ${diff.name}: ${err.message}`);
+      log(`  ${chalk.red("✖")} Trigger ${diff.name}: ${err.message}`);
     }
   }
 
   // 3. SYNC TAGS
-  console.log(chalk.bold(`\nSyncing Tags...`));
+  log(chalk.bold(`\nSyncing Tags...`));
   for (const diff of [...tagsToCreate, ...tagsToUpdate]) {
     try {
       const sourceTag = sourceState.tags.find((t) => t.tagId === diff.sourceId);
@@ -438,7 +444,7 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
           config,
         });
         result.tagsCreated++;
-        console.log(`  ${chalk.green("+")} Created: ${sourceTag.name}`);
+        log(`  ${chalk.green("+")} Created: ${sourceTag.name}`);
       } else {
         await updateTag({
           tagId: diff.targetId!,
@@ -448,15 +454,15 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
           config,
         });
         result.tagsUpdated++;
-        console.log(`  ${chalk.cyan("~")} Updated: ${sourceTag.name}`);
+        log(`  ${chalk.cyan("~")} Updated: ${sourceTag.name}`);
       }
     } catch (err: any) {
       result.errors.push(err.message);
-      console.log(`  ${chalk.red("✖")} Tag ${diff.name}: ${err.message}`);
+      log(`  ${chalk.red("✖")} Tag ${diff.name}: ${err.message}`);
     }
   }
 
-  console.log(
+  log(
     chalk.bold(
       result.errors.length
         ? `\nSync completed with ${result.errors.length} errors.`

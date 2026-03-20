@@ -14,6 +14,7 @@ import chalk from "chalk";
 import { buildCompleteTagConfig, listTags, updateTag, getTag } from "../lib/gtm-cli.js";
 import { discoverTriggerByEvent } from "../lib/architecture.js";
 import { createPreFixBackup } from "../lib/pre-fix-backup.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 import type { GtmTag } from "../types/gtm.js";
 
 export type FiringOption = "oncePerEvent" | "oncePerLoad" | "unlimited";
@@ -108,6 +109,10 @@ function determineIdealFiringOption(
  * If `option` is provided, it overrides the per-tag logic for all tags.
  */
 export async function fixFiring(option?: FiringOption, dryRun = false): Promise<FixFiringResult> {
+  if (!dryRun) {
+    await requireWriteAccess();
+  }
+
   const flagged = await scanUnlimitedFiring();
   const pageViewTriggerId = option ? null : await discoverTriggerByEvent("page_view");
 

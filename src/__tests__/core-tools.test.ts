@@ -117,6 +117,84 @@ describe("Config Profile Resolution", () => {
       metaPixelId: "12345",
     });
   });
+
+  it("validates adjacent promotion flow using profile environments", async () => {
+    writeFileSync(
+      tmpConfigPath,
+      JSON.stringify({
+        accountId: "111",
+        containerId: "222",
+        workspaceId: "1",
+        profiles: [
+          {
+            name: "dev",
+            accountId: "333",
+            containerId: "444",
+            workspaceId: "2",
+            environment: "development",
+          },
+          {
+            name: "stage",
+            accountId: "555",
+            containerId: "666",
+            workspaceId: "3",
+            environment: "staging",
+          },
+          {
+            name: "prod",
+            accountId: "777",
+            containerId: "888",
+            workspaceId: "4",
+            environment: "production",
+          },
+        ],
+      }),
+    );
+
+    const { validatePromotionFlow } = await import("../lib/config.js");
+
+    expect(validatePromotionFlow("dev", "stage")).toMatchObject({
+      sourceEnvironment: "development",
+      targetEnvironment: "staging",
+    });
+    expect(() => validatePromotionFlow("dev", "prod")).toThrow("Invalid promotion path");
+  });
+
+  it("supports configurable promotion flow order", async () => {
+    writeFileSync(
+      tmpConfigPath,
+      JSON.stringify({
+        accountId: "111",
+        containerId: "222",
+        workspaceId: "1",
+        promotionFlow: ["development", "production"],
+        profiles: [
+          {
+            name: "dev",
+            accountId: "333",
+            containerId: "444",
+            workspaceId: "2",
+            environment: "development",
+          },
+          {
+            name: "prod",
+            accountId: "777",
+            containerId: "888",
+            workspaceId: "4",
+            environment: "production",
+          },
+        ],
+      }),
+    );
+
+    const { validatePromotionFlow } = await import("../lib/config.js");
+
+    expect(validatePromotionFlow("dev", "prod")).toMatchObject({
+      sourceEnvironment: "development",
+      targetEnvironment: "production",
+      allowedFlow: ["development", "production"],
+    });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════

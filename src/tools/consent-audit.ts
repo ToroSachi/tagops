@@ -26,6 +26,7 @@ import {
   ANALYTICS_VENDOR_PATTERNS,
 } from "../lib/architecture.js";
 import { createPreFixBackup } from "../lib/pre-fix-backup.js";
+import { requireWriteAccess } from "../lib/permission-guard.js";
 import type {
   GtmTag,
   TagDataCategory,
@@ -255,6 +256,10 @@ export async function auditConsentV2(): Promise<ConsentAuditReport> {
 export async function fixConsentV2(
   dryRun = false,
 ): Promise<{ fixed: number; skipped: number; errors: number; actions: string[] }> {
+  if (!dryRun) {
+    await requireWriteAccess();
+  }
+
   const report = await auditConsentV2();
   const toFix = report.tags.filter(
     (t) =>

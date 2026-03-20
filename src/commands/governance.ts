@@ -3,6 +3,40 @@ import chalk from "chalk";
 
 export function registerGovernanceCommands(program: Command) {
   program
+    .command("policy-check")
+    .description("Run policy pack checks against a GTM workspace")
+    .option("--config <file>", "Policy config file (default: .tagops-policies.json)")
+    .action(async (opts: { config?: string }) => {
+      const [{ evaluatePolicies, loadPoliciesFromConfig, printPolicyReport }, gtmCli] =
+        await Promise.all([import("../lib/policies.js"), import("../lib/gtm-cli.js")]);
+      try {
+        const [tags, triggers, variables] = await Promise.all([
+          gtmCli.listTags(),
+          gtmCli.listTriggers(),
+          gtmCli.listVariables(),
+        ]);
+
+        if (tags.length === 0 && triggers.length === 0) {
+          throw new Error("Cannot connect to GTM. Run: tagops auth login");
+        }
+
+        const policies = loadPoliciesFromConfig(opts.config);
+        const report = evaluatePolicies(tags, triggers, variables, policies);
+
+        if (program.opts().json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          printPolicyReport(report);
+        }
+
+        if (!report.passed) process.exit(1);
+      } catch (err) {
+        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        process.exit(1);
+      }
+    });
+
+  program
     .command("lint")
     .description("Run configurable compliance checks against a GTM workspace")
     .option("--config <file>", "Lint config file (default: gtm-lint.json)")

@@ -101,6 +101,39 @@ export const GtmBuiltInVariableSchema = z
   })
   .passthrough();
 
+export const GtmClientSchema = z
+  .object({
+    clientId: z.string(),
+    name: z.string(),
+    type: z.string(),
+    parameter: z.array(GtmParameterSchema).optional(),
+    priority: z.number().optional(),
+    fingerprint: z.string(),
+    path: z.string(),
+    notes: z.string().optional(),
+    parentFolderId: z.string().optional(),
+    accountId: z.string().optional(),
+    containerId: z.string().optional(),
+    workspaceId: z.string().optional(),
+  })
+  .passthrough();
+
+export const GtmTransformationSchema = z
+  .object({
+    transformationId: z.string(),
+    name: z.string(),
+    type: z.string(),
+    parameter: z.array(GtmParameterSchema).optional(),
+    fingerprint: z.string(),
+    path: z.string(),
+    notes: z.string().optional(),
+    parentFolderId: z.string().optional(),
+    accountId: z.string().optional(),
+    containerId: z.string().optional(),
+    workspaceId: z.string().optional(),
+  })
+  .passthrough();
+
 export const GtmGalleryReferenceSchema = z
   .object({
     galleryTemplateId: z.string().optional(),
@@ -188,13 +221,17 @@ export const SnapshotSchema = z.object({
     containerId: z.string().optional(),
     workspaceId: z.string().optional(),
     description: z.string().optional(),
+    versionId: z.string().optional(),
+    publishedAt: z.string().optional(),
   }),
   tags: z.array(GtmTagSchema),
   triggers: z.array(GtmTriggerSchema),
   variables: z.array(GtmVariableSchema),
   folders: z.array(GtmFolderSchema).optional(),
   builtInVariables: z.array(GtmBuiltInVariableSchema).optional(),
+  clients: z.array(GtmClientSchema).optional(),
   customTemplates: z.array(GtmCustomTemplateSchema).optional(),
+  transformations: z.array(GtmTransformationSchema).optional(),
   zones: z.array(GtmZoneSchema).optional(),
   environments: z.array(GtmEnvironmentSchema).optional(),
 });

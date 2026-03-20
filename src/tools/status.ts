@@ -8,8 +8,9 @@
  *   npx tsx src/cli.ts status
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import { listTags, listTriggers, listVariables } from "../lib/gtm-cli.js";
 import { checkAuthStatus } from "../lib/auth.js";
@@ -29,13 +30,27 @@ export interface StatusReport {
   lastBackup: string | null;
 }
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function getCliVersion(): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(__dirname, "../../package.json"), "utf-8")) as {
+      version?: unknown;
+    };
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function checkStatus(): Promise<StatusReport> {
   const config = loadConfig();
   const configPath = getConfigPath();
 
   // Check CLI installed — we no longer have a python CLI wrapper, so this is just true if the node tool is running.
   const cliInstalled = true;
-  const cliVersion = "2.4.0"; // We'll hardcode for now or import from package.json if needed
+  const cliVersion = getCliVersion();
 
   // Check auth
   const authCheck = await checkAuthStatus();
@@ -96,7 +111,11 @@ export function printStatus(report: StatusReport): void {
 
   console.log(
     `  GTM CLI:      ${report.cliInstalled ? ok : fail} ${
-      report.cliInstalled ? `installed (${report.cliVersion})` : "not installed"
+      report.cliInstalled
+        ? report.cliVersion
+          ? `installed (${report.cliVersion})`
+          : "installed"
+        : "not installed"
     }`,
   );
   console.log(

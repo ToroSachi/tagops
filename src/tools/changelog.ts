@@ -13,13 +13,20 @@
 import chalk from "chalk";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { listTags, listTriggers, listVariables } from "../lib/gtm-cli.js";
+import {
+  listEnvironments,
+  listFolders,
+  listTags,
+  listTriggers,
+  listVariables,
+} from "../lib/gtm-cli.js";
+import { parseSnapshot } from "../types/schemas.js";
 import type { GtmSnapshot } from "./snapshot.js";
-import type { GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
+import type { GtmEnvironment, GtmFolder, GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 export interface ChangelogEntry {
   action: "added" | "removed" | "modified" | "paused" | "unpaused";
-  resource: "tag" | "trigger" | "variable";
+  resource: "tag" | "trigger" | "variable" | "folder" | "environment";
   name: string;
   id: string;
   details?: string;
@@ -33,11 +40,20 @@ export interface ChangelogReport {
   summary: string;
 }
 
+function stripTagOpsId(notes?: string): string | undefined {
+  if (!notes) return undefined;
+  const withoutId = notes
+    .replace(/(?:^|\n)\s*TagOps-ID:\s*[a-f0-9-]+\s*(?=\n|$)/gi, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return withoutId.length > 0 ? withoutId : undefined;
+}
+
 function loadSnapshotFile(path: string): GtmSnapshot {
   if (!existsSync(path)) {
     throw new Error(`Snapshot not found: ${path}`);
   }
-  return JSON.parse(readFileSync(path, "utf-8")) as GtmSnapshot;
+  return parseSnapshot(readFileSync(path, "utf-8")) as GtmSnapshot;
 }
 
 /**
@@ -46,25 +62,41 @@ function loadSnapshotFile(path: string): GtmSnapshot {
 function diffResources<T extends { name: string }>(
   oldItems: T[],
   newItems: T[],
-  idKey: keyof T,
-  resourceType: "tag" | "trigger" | "variable",
+  getIdentityKey: (item: T) => string,
+  getDisplayId: (item: T) => string,
+  resourceType: "tag" | "trigger" | "variable" | "folder" | "environment",
   getDetails?: (oldItem: T, newItem: T) => string | undefined,
+  getComparable: (item: T) => Record<string, unknown> = (item) => {
+    const clone = { ...(item as Record<string, unknown>) };
+    delete clone.fingerprint;
+    return clone;
+  },
 ): ChangelogEntry[] {
   const entries: ChangelogEntry[] = [];
-  const oldMap = new Map(oldItems.map((i) => [String(i[idKey]), i]));
-  const newMap = new Map(newItems.map((i) => [String(i[idKey]), i]));
+  const oldMap = new Map(oldItems.map((i) => [getIdentityKey(i), i]));
+  const newMap = new Map(newItems.map((i) => [getIdentityKey(i), i]));
 
   // Added
   for (const [id, item] of newMap) {
     if (!oldMap.has(id)) {
-      entries.push({ action: "added", resource: resourceType, name: item.name, id });
+      entries.push({
+        action: "added",
+        resource: resourceType,
+        name: item.name,
+        id: getDisplayId(item),
+      });
     }
   }
 
   // Removed
   for (const [id, item] of oldMap) {
     if (!newMap.has(id)) {
-      entries.push({ action: "removed", resource: resourceType, name: item.name, id });
+      entries.push({
+        action: "removed",
+        resource: resourceType,
+        name: item.name,
+        id: getDisplayId(item),
+      });
     }
   }
 
@@ -89,16 +121,24 @@ function diffResources<T extends { name: string }>(
 
     // Check for general modifications (skip fingerprint)
     const changedFields: string[] = [];
-    for (const key of Object.keys(newItem) as (keyof T)[]) {
-      if (key === ("fingerprint" as keyof T)) continue;
-      if (JSON.stringify(newItem[key]) !== JSON.stringify(oldItem[key])) {
-        changedFields.push(String(key));
+    const oldComparable = getComparable(oldItem);
+    const newComparable = getComparable(newItem);
+    const keys = new Set([...Object.keys(oldComparable), ...Object.keys(newComparable)]);
+    for (const key of keys) {
+      if (JSON.stringify(newComparable[key]) !== JSON.stringify(oldComparable[key])) {
+        changedFields.push(key);
       }
     }
 
     if (changedFields.length > 0) {
       const details = getDetails?.(oldItem, newItem) ?? `Changed: ${changedFields.join(", ")}`;
-      entries.push({ action: "modified", resource: resourceType, name: newItem.name, id, details });
+      entries.push({
+        action: "modified",
+        resource: resourceType,
+        name: newItem.name,
+        id: getDisplayId(newItem),
+        details,
+      });
     }
   }
 
@@ -141,6 +181,56 @@ function getTagDetails(oldTag: GtmTag, newTag: GtmTag): string | undefined {
   return parts.length > 0 ? parts.join("; ") : undefined;
 }
 
+function getFolderDetails(oldFolder: GtmFolder, newFolder: GtmFolder): string | undefined {
+  if (stripTagOpsId(oldFolder.notes) !== stripTagOpsId(newFolder.notes)) {
+    return "Notes updated";
+  }
+  return undefined;
+}
+
+function getEnvironmentDetails(
+  oldEnvironment: GtmEnvironment,
+  newEnvironment: GtmEnvironment,
+): string | undefined {
+  const parts: string[] = [];
+
+  if (oldEnvironment.type !== newEnvironment.type) {
+    parts.push(`type: ${oldEnvironment.type} → ${newEnvironment.type}`);
+  }
+
+  if ((oldEnvironment.description ?? "") !== (newEnvironment.description ?? "")) {
+    parts.push("description updated");
+  }
+
+  if ((oldEnvironment.url ?? "") !== (newEnvironment.url ?? "")) {
+    parts.push("URL updated");
+  }
+
+  return parts.length > 0 ? parts.join("; ") : undefined;
+}
+
+function getFolderIdentity(folder: GtmFolder): string {
+  return `${folder.folderId}::${folder.name}`;
+}
+
+function getEnvironmentIdentity(environment: GtmEnvironment): string {
+  return `${environment.environmentId}::${environment.name}`;
+}
+
+function normalizeFolder(folder: GtmFolder): Record<string, unknown> {
+  return {
+    notes: stripTagOpsId(folder.notes) ?? null,
+  };
+}
+
+function normalizeEnvironment(environment: GtmEnvironment): Record<string, unknown> {
+  return {
+    description: environment.description ?? null,
+    type: environment.type,
+    url: environment.url ?? null,
+  };
+}
+
 /**
  * Generate a changelog between two states.
  */
@@ -151,11 +241,15 @@ export async function generateChangelog(opts: {
   let oldTags: GtmTag[];
   let oldTriggers: GtmTrigger[];
   let oldVariables: GtmVariable[];
+  let oldFolders: GtmFolder[];
+  let oldEnvironments: GtmEnvironment[];
   let fromLabel: string;
 
   let newTags: GtmTag[];
   let newTriggers: GtmTrigger[];
   let newVariables: GtmVariable[];
+  let newFolders: GtmFolder[];
+  let newEnvironments: GtmEnvironment[];
   let toLabel: string;
 
   // Load "from" state
@@ -164,6 +258,8 @@ export async function generateChangelog(opts: {
     oldTags = snap.tags;
     oldTriggers = snap.triggers;
     oldVariables = snap.variables;
+    oldFolders = snap.folders ?? [];
+    oldEnvironments = snap.environments ?? [];
     fromLabel = opts.from;
   } else {
     // Default: latest gtm-snapshot.json
@@ -172,6 +268,8 @@ export async function generateChangelog(opts: {
     oldTags = snap.tags;
     oldTriggers = snap.triggers;
     oldVariables = snap.variables;
+    oldFolders = snap.folders ?? [];
+    oldEnvironments = snap.environments ?? [];
     fromLabel = "gtm-snapshot.json";
   }
 
@@ -181,19 +279,62 @@ export async function generateChangelog(opts: {
     newTags = snap.tags;
     newTriggers = snap.triggers;
     newVariables = snap.variables;
+    newFolders = snap.folders ?? [];
+    newEnvironments = snap.environments ?? [];
     toLabel = opts.to;
   } else {
     // Default: current live workspace
-    newTags = await listTags();
-    newTriggers = await listTriggers();
-    newVariables = await listVariables();
+    [newTags, newTriggers, newVariables, newFolders, newEnvironments] = await Promise.all([
+      listTags(),
+      listTriggers(),
+      listVariables(),
+      listFolders(),
+      listEnvironments(),
+    ]);
     toLabel = "current workspace";
   }
 
   const entries: ChangelogEntry[] = [
-    ...diffResources<GtmTag>(oldTags, newTags, "tagId", "tag", getTagDetails),
-    ...diffResources(oldTriggers, newTriggers, "triggerId" as keyof GtmTrigger, "trigger"),
-    ...diffResources(oldVariables, newVariables, "variableId" as keyof GtmVariable, "variable"),
+    ...diffResources<GtmTag>(
+      oldTags,
+      newTags,
+      (tag) => tag.tagId,
+      (tag) => tag.tagId,
+      "tag",
+      getTagDetails,
+    ),
+    ...diffResources(
+      oldTriggers,
+      newTriggers,
+      (trigger) => trigger.triggerId,
+      (trigger) => trigger.triggerId,
+      "trigger",
+    ),
+    ...diffResources(
+      oldVariables,
+      newVariables,
+      (variable) => variable.variableId,
+      (variable) => variable.variableId,
+      "variable",
+    ),
+    ...diffResources(
+      oldFolders,
+      newFolders,
+      getFolderIdentity,
+      (folder) => folder.folderId,
+      "folder",
+      getFolderDetails,
+      normalizeFolder,
+    ),
+    ...diffResources(
+      oldEnvironments,
+      newEnvironments,
+      getEnvironmentIdentity,
+      (environment) => environment.environmentId,
+      "environment",
+      getEnvironmentDetails,
+      normalizeEnvironment,
+    ),
   ];
 
   // Build summary
@@ -248,11 +389,15 @@ export function renderChangelogMarkdown(report: ChangelogReport): string {
   };
 
   // Group by resource type
-  for (const resourceType of ["tag", "trigger", "variable"] as const) {
+  for (const resourceType of ["tag", "trigger", "variable", "folder", "environment"] as const) {
     const group = report.entries.filter((e) => e.resource === resourceType);
     if (group.length === 0) continue;
 
-    ln(`## ${resourceType.charAt(0).toUpperCase() + resourceType.slice(1)}s`);
+    const heading =
+      resourceType === "environment"
+        ? "Environments"
+        : `${resourceType.charAt(0).toUpperCase() + resourceType.slice(1)}s`;
+    ln(`## ${heading}`);
     ln();
     for (const entry of group) {
       const icon = icons[entry.action];

@@ -35,6 +35,7 @@ import {
   TRIGGER_MAP,
   VARIABLE_MAP,
   ACTION_TO_TRIGGER,
+  ALL_PAGES_TRIGGER_ID as DEFAULT_ALL_PAGES_TRIGGER_ID,
   discoverTriggerByEvent,
 } from "./lib/architecture.js";
 import { loadConfig } from "./lib/config.js";
@@ -396,9 +397,20 @@ server.tool(
   async () => {
     try {
       const { assessSSTReadiness } = await import("./tools/sst-readiness.js");
-      const { listTags, listVariables } = await import("./lib/gtm-cli.js");
-      const [tags, variables] = await Promise.all([listTags(), listVariables()]);
-      const report = assessSSTReadiness(tags, variables);
+      const { getContainer, listClients, listTags, listTransformations, listVariables } =
+        await import("./lib/gtm-cli.js");
+      const container = await getContainer();
+      const [tags, variables, clients, transformations] = await Promise.all([
+        listTags(),
+        listVariables(),
+        container.features?.supportClients ? listClients() : Promise.resolve([]),
+        container.features?.supportTransformations ? listTransformations() : Promise.resolve([]),
+      ]);
+      const report = assessSSTReadiness(tags, variables, {
+        container,
+        clients,
+        transformations,
+      });
       return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `ERROR: ${(err as Error).message}` }] };
@@ -547,6 +559,229 @@ server.tool(
 );
 
 // --- Implement pixel from requirements ---
+interface PixelRequest {
+  action: string;
+  page_filter?: string;
+  dynamic_values?: Record<string, string>;
+  content_id?: string;
+}
+
+interface TemplatePreviewTag {
+  name: string;
+  type: string;
+  triggerEvent: string;
+  consentType?: string;
+  html: string;
+}
+
+interface PixelTagPlan {
+  name: string;
+  html: string;
+  triggerEvent: string;
+  consentType?: string;
+  pageFilter?: string;
+  source: "template" | "generic";
+}
+
+function normalizeComparableText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function formatActionLabel(action: string): string {
+  return action
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function getActionKeywords(action: string): string[] {
+  switch (action) {
+    case "purchase":
+      return ["purchase"];
+    case "signup":
+      return ["signup", "sign up"];
+    case "registration":
+      return ["registration", "register"];
+    case "lead":
+      return ["lead"];
+    case "content":
+      return ["content", "view content"];
+    case "pageview":
+    case "page_view":
+      return ["pageview", "page view", "page visit"];
+    case "view_item":
+      return ["view item", "view content", "content"];
+    case "add_to_cart":
+      return ["add to cart", "addtocart"];
+    case "checkout":
+    case "begin_checkout":
+      return ["checkout", "begin checkout", "initiate checkout", "start checkout"];
+    default:
+      return [action.replace(/_/g, " ")];
+  }
+}
+
+function isRenderableTemplateTag(tag: TemplatePreviewTag): boolean {
+  return tag.type === "html" && tag.html.trim().length > 0;
+}
+
+function isBootstrapTemplateTag(tag: TemplatePreviewTag): boolean {
+  if (!isRenderableTemplateTag(tag)) {
+    return false;
+  }
+
+  if (tag.triggerEvent === "all_pages") {
+    return true;
+  }
+
+  if (tag.triggerEvent !== "page_view") {
+    return false;
+  }
+
+  const name = tag.name.toLowerCase();
+  const bootstrapNamePattern =
+    /\b(base|loader|global|tracking|universal|page ?view|page ?visit|base script)\b/;
+  const bootstrapHtmlPattern =
+    /document\.createElement\(['"]script['"]\)|appendChild\(|insertBefore\(|\.src\s*=\s*['"]https?:\/\/|\.init\(|fbq\('init'|ttq\.load\(|pintrk\('load'|rdt\('init'|MAI\.init|geq\.load\(|window\.__/i;
+
+  return bootstrapNamePattern.test(name) || bootstrapHtmlPattern.test(tag.html);
+}
+
+function scoreTemplateTagForAction(tag: TemplatePreviewTag, action: string): number {
+  const haystack = normalizeComparableText(`${tag.name} ${tag.html}`);
+  return getActionKeywords(action).reduce((score, keyword) => {
+    return score + (haystack.includes(normalizeComparableText(keyword)) ? 10 : 0);
+  }, 0);
+}
+
+function selectTemplateTagForPixel(
+  tags: TemplatePreviewTag[],
+  pixel: PixelRequest,
+  triggerEvent: string,
+): TemplatePreviewTag | null {
+  const candidates = tags.filter(
+    (tag) => tag.triggerEvent === triggerEvent && isRenderableTemplateTag(tag),
+  );
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const rankedCandidates = candidates
+    .map((tag) => ({ tag, score: scoreTemplateTagForAction(tag, pixel.action.toLowerCase()) }))
+    .sort((left, right) => right.score - left.score);
+
+  if ((rankedCandidates[0]?.score ?? 0) > 0) {
+    return rankedCandidates[0]?.tag ?? null;
+  }
+
+  if (triggerEvent === "page_view") {
+    return candidates.find((tag) => isBootstrapTemplateTag(tag)) ?? null;
+  }
+
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function buildGenericPixelScaffold(
+  vendorName: string,
+  pixelId: string,
+  pixel: PixelRequest,
+): string {
+  const action = pixel.action.toLowerCase();
+  const dynamicAssignments = Object.entries(pixel.dynamic_values ?? {})
+    .map(([key, dataLayerKey]) => {
+      const gtmVariable = VARIABLE_MAP[dataLayerKey] ?? dataLayerKey;
+      return `  payload[${JSON.stringify(key)}] = {{${gtmVariable}}} || "";`;
+    })
+    .join("\n");
+
+  const contentIdAssignment = pixel.content_id
+    ? `  payload.content_id = ${JSON.stringify(pixel.content_id)};`
+    : "";
+  const pageFilterAssignment = pixel.page_filter
+    ? `  payload.page_filter = ${JSON.stringify(pixel.page_filter)};`
+    : "";
+
+  return [
+    "<script>",
+    "(function() {",
+    "  var payload = {",
+    `    vendor: ${JSON.stringify(vendorName)},`,
+    `    pixel_id: ${JSON.stringify(pixelId)},`,
+    `    action: ${JSON.stringify(action)}`,
+    "  };",
+    contentIdAssignment,
+    pageFilterAssignment,
+    dynamicAssignments,
+    "  window.tagopsPixelQueue = window.tagopsPixelQueue || [];",
+    "  window.tagopsPixelQueue.push(payload);",
+    '  if (window.console && typeof window.console.info === "function") {',
+    '    window.console.info("Replace this scaffold with the vendor\'s official pixel code or install a matching TagOps template.", payload);',
+    "  }",
+    "})();",
+    "</script>",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function getTriggerLabel(triggerEvent: string): string {
+  return triggerEvent === "all_pages"
+    ? "All Pages"
+    : (TRIGGER_MAP[triggerEvent]?.name ?? triggerEvent);
+}
+
+async function resolveTriggerForPlan(
+  triggerEvent: string,
+  pageFilter: string | undefined,
+  dryRun: boolean | undefined,
+): Promise<string> {
+  if (!pageFilter || triggerEvent === "all_pages") {
+    if (dryRun) {
+      return pageFilter ? `${triggerEvent} (${pageFilter})` : triggerEvent;
+    }
+
+    if (triggerEvent === "all_pages") {
+      return DEFAULT_ALL_PAGES_TRIGGER_ID;
+    }
+
+    return (await discoverTriggerByEvent(triggerEvent)) ?? "";
+  }
+
+  if (dryRun) {
+    return `${triggerEvent} (${pageFilter})`;
+  }
+
+  const triggerName = `${getTriggerLabel(triggerEvent)} (${pageFilter})`;
+  const eventName = TRIGGER_MAP[triggerEvent]?.event ?? triggerEvent;
+  const trigger = await createTrigger(triggerName, "CUSTOM_EVENT", {
+    customEventFilter: [
+      {
+        type: "EQUALS",
+        parameter: [
+          { type: "TEMPLATE", key: "arg0", value: "{{_event}}" },
+          { type: "TEMPLATE", key: "arg1", value: eventName },
+        ],
+      },
+    ],
+    filter: [
+      {
+        type: "CONTAINS",
+        parameter: [
+          { type: "TEMPLATE", key: "arg0", value: "{{Page Path}}" },
+          { type: "TEMPLATE", key: "arg1", value: pageFilter },
+        ],
+      },
+    ],
+  });
+
+  return trigger?.triggerId ?? "";
+}
+
 if (!IS_READ_ONLY) {
   server.tool(
     "gtm_implement_pixel",
@@ -582,84 +817,120 @@ if (!IS_READ_ONLY) {
         .describe("If true, returns what would be created without making changes"),
     },
     async ({ vendor_name, pixel_id, pixels, dry_run }) => {
+      const { findTemplateIdByVendor, previewTemplate } = await import("./templates/registry.js");
+
       const results: PixelResult[] = [];
+      const templateId = findTemplateIdByVendor(vendor_name);
+      const templatePreview = templateId
+        ? previewTemplate(templateId, { pixelId: pixel_id })
+        : null;
+      const requestedPlans: PixelTagPlan[] = [];
+      const matchedTemplateBaseNames = new Set<string>();
 
-      for (const pixel of pixels) {
-        const action = pixel.action.toLowerCase();
-        const triggerEvent = ACTION_TO_TRIGGER[action] ?? "page_view";
-        let triggerId = dry_run
-          ? triggerEvent
-          : ((await discoverTriggerByEvent(triggerEvent)) ?? "");
-        const tagName = `${vendor_name} – ${action.charAt(0).toUpperCase() + action.slice(1)}${
-          pixel.page_filter ? ` (${pixel.page_filter})` : ""
-        }`;
+      if (templatePreview) {
+        for (const pixel of pixels) {
+          const triggerEvent = ACTION_TO_TRIGGER[pixel.action.toLowerCase()] ?? "page_view";
+          const matchedTag = selectTemplateTagForPixel(
+            templatePreview.tags as TemplatePreviewTag[],
+            pixel as PixelRequest,
+            triggerEvent,
+          );
 
-        // If there's a page filter, create a filtered trigger
-        if (pixel.page_filter && !dry_run) {
-          const trigName = `CE - Page View (${pixel.page_filter})`;
-          const trigConfig = {
-            customEventFilter: [
-              {
-                type: "EQUALS",
-                parameter: [
-                  { type: "TEMPLATE", key: "arg0", value: "{{_event}}" },
-                  { type: "TEMPLATE", key: "arg1", value: "ce_page_view" },
-                ],
-              },
-            ],
-            filter: [
-              {
-                type: "CONTAINS",
-                parameter: [
-                  { type: "TEMPLATE", key: "arg0", value: "{{Page Path}}" },
-                  { type: "TEMPLATE", key: "arg1", value: pixel.page_filter },
-                ],
-              },
-            ],
-          };
-          const trigResult = await createTrigger(trigName, "CUSTOM_EVENT", trigConfig);
-          if (trigResult?.triggerId) {
-            triggerId = trigResult.triggerId;
+          if (matchedTag) {
+            requestedPlans.push({
+              name: `${matchedTag.name}${pixel.page_filter ? ` (${pixel.page_filter})` : ""}`,
+              html: matchedTag.html,
+              triggerEvent: matchedTag.triggerEvent,
+              consentType: matchedTag.consentType,
+              pageFilter: pixel.page_filter,
+              source: "template",
+            });
+            matchedTemplateBaseNames.add(matchedTag.name);
+            continue;
           }
+
+          requestedPlans.push({
+            name: `${vendor_name} – ${formatActionLabel(pixel.action)}${
+              pixel.page_filter ? ` (${pixel.page_filter})` : ""
+            }`,
+            html: buildGenericPixelScaffold(vendor_name, pixel_id, pixel as PixelRequest),
+            triggerEvent,
+            consentType: "ad_storage",
+            pageFilter: pixel.page_filter,
+            source: "generic",
+          });
         }
+      } else {
+        for (const pixel of pixels) {
+          const triggerEvent = ACTION_TO_TRIGGER[pixel.action.toLowerCase()] ?? "page_view";
+          requestedPlans.push({
+            name: `${vendor_name} – ${formatActionLabel(pixel.action)}${
+              pixel.page_filter ? ` (${pixel.page_filter})` : ""
+            }`,
+            html: buildGenericPixelScaffold(vendor_name, pixel_id, pixel as PixelRequest),
+            triggerEvent,
+            consentType: "ad_storage",
+            pageFilter: pixel.page_filter,
+            source: "generic",
+          });
+        }
+      }
+
+      const bootstrapPlans: PixelTagPlan[] =
+        templatePreview && matchedTemplateBaseNames.size > 0
+          ? (templatePreview.tags as TemplatePreviewTag[])
+              .filter(
+                (tag) => isBootstrapTemplateTag(tag) && !matchedTemplateBaseNames.has(tag.name),
+              )
+              .map((tag) => ({
+                name: tag.name,
+                html: tag.html,
+                triggerEvent: tag.triggerEvent,
+                consentType: tag.consentType,
+                source: "template" as const,
+              }))
+          : [];
+
+      const plans = [...bootstrapPlans, ...requestedPlans];
+      const seenPlanKeys = new Set<string>();
+
+      for (const plan of plans) {
+        const dedupeKey = `${plan.name}::${plan.triggerEvent}::${plan.pageFilter ?? ""}`;
+        if (seenPlanKeys.has(dedupeKey)) {
+          continue;
+        }
+        seenPlanKeys.add(dedupeKey);
+
+        const triggerId = await resolveTriggerForPlan(plan.triggerEvent, plan.pageFilter, dry_run);
 
         if (!dry_run && !triggerId) {
           throw new Error(
-            `Could not find a matching GTM trigger for "${triggerEvent}". Create the trigger before installing this pixel.`,
+            `Could not find a matching GTM trigger for "${getTriggerLabel(plan.triggerEvent)}". Create the trigger before installing this pixel.`,
           );
         }
 
-        // Build the HTML
-        let html: string;
-        if (pixel.dynamic_values && Object.keys(pixel.dynamic_values).length > 0) {
-          const params = Object.entries(pixel.dynamic_values)
-            .map(([key, dlv]) => {
-              const gtmVar = VARIABLE_MAP[dlv] ?? dlv;
-              return `  var ${key} = {{${gtmVar}}} || "";`;
-            })
-            .join("\n");
-          const urlParams = Object.keys(pixel.dynamic_values)
-            .map((key) => `' + "&${key}=" + encodeURIComponent(${key}) + '`)
-            .join("");
-          html = `<script>\n(function() {\n${params}\n  var img = new Image(1,1);\n  img.src = 'https://arttrk.com/pixel/?ad_log=referer&action=${action}${urlParams}&pixid=${pixel_id}';\n})();\n</script>`;
-        } else {
-          const contentParam = pixel.content_id ? `&content_id=${pixel.content_id}` : "";
-          html = `<img src="https://arttrk.com/pixel/?ad_log=referer&action=${action}${contentParam}&pixid=${pixel_id}" width="1" height="1" border="0" style="display:none">`;
-        }
-
         if (dry_run) {
-          results.push({ action: "DRY_RUN", tagName, triggerId, html });
+          results.push({
+            action: "DRY_RUN",
+            tagName: plan.name,
+            triggerId,
+            html: plan.html,
+            result:
+              plan.source === "template"
+                ? `template:${templateId ?? "matched"}`
+                : "generic_custom_html_scaffold",
+          });
         } else {
-          const config = buildHtmlTagConfig(html, "ad_storage");
+          const config = buildHtmlTagConfig(plan.html, plan.consentType ?? "ad_storage");
           const createResult = await createTag({
-            name: tagName,
+            name: plan.name,
             type: "html",
             firingTriggerId: triggerId,
             config,
           });
           results.push({
             action: createResult ? "CREATED" : "ERROR",
-            tagName,
+            tagName: plan.name,
             triggerId,
             result: createResult?.substring(0, 200),
           });
