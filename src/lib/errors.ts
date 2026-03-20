@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { getSafeErrorMessage, redactSensitiveText } from "./redaction.js";
 
 /** Standardized error codes for the TagOps CLI. */
 export enum ErrorCode {
@@ -47,7 +48,7 @@ export function handleError(err: unknown): never {
 
   if (err instanceof TagOpsError) {
     console.error(chalk.red.bold(`\n  ✖ [${err.code}] Error`));
-    console.error(`  ${err.message}`);
+    console.error(`  ${getSafeErrorMessage(err.message)}`);
     if (err.suggestion) {
       console.error(chalk.yellow(`\n  💡 Suggestion:`));
       console.error(`  ${err.suggestion}\n`);
@@ -76,16 +77,16 @@ export function handleError(err: unknown): never {
       console.error(chalk.yellow(`\n  💡 Suggestion:`));
       console.error(`  Wait exactly 100 seconds before retrying (100 requests / 100 sec limit).\n`);
     } else {
-      console.error(`  ${err instanceof Error ? err.message : String(err)}\n`);
+      console.error(`  ${getSafeErrorMessage(err)}\n`);
     }
   }
 
   if (isDebug) {
     console.error(chalk.dim("\n--- Stack Trace ---"));
-    if (err instanceof Error) console.error(chalk.dim(err.stack));
+    if (err instanceof Error) console.error(chalk.dim(redactSensitiveText(err.stack ?? "")));
     if (err instanceof TagOpsError && err.cause instanceof Error) {
       console.error(chalk.dim("\n--- Caused By ---"));
-      console.error(chalk.dim(err.cause.stack));
+      console.error(chalk.dim(redactSensitiveText(err.cause.stack ?? "")));
     }
     console.error(chalk.dim("-------------------\n"));
   } else {

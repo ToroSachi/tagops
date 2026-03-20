@@ -11,10 +11,18 @@ import { resolve } from "node:path";
 import { z } from "zod";
 
 export const CONFIG_FILENAME = ".gtmrc.json";
+const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+$/;
 
 // ── Zod schema for config validation ──
 
 const PromotionEnvironmentSchema = z.enum(["development", "staging", "production"]);
+
+function safeIdentifierSchema(label: string) {
+  return z
+    .string()
+    .min(1, `${label} is required`)
+    .regex(SAFE_IDENTIFIER_PATTERN, `${label} must contain only letters, numbers, and dashes`);
+}
 
 export type PromotionEnvironment = z.infer<typeof PromotionEnvironmentSchema>;
 
@@ -25,10 +33,10 @@ export const DEFAULT_PROMOTION_FLOW: PromotionEnvironment[] = [
 ];
 
 const GtmProfileSchema = z.object({
-  name: z.string().min(1, "profile name is required"),
-  accountId: z.string().min(1, "accountId is required"),
-  containerId: z.string().min(1, "containerId is required"),
-  workspaceId: z.string().min(1, "workspaceId is required"),
+  name: safeIdentifierSchema("profile name"),
+  accountId: safeIdentifierSchema("accountId"),
+  containerId: safeIdentifierSchema("containerId"),
+  workspaceId: safeIdentifierSchema("workspaceId"),
   ga4MeasurementId: z.string().optional(),
   metaPixelId: z.string().optional(),
   environment: PromotionEnvironmentSchema.optional(),
@@ -37,9 +45,9 @@ const GtmProfileSchema = z.object({
 export type GtmProfile = z.infer<typeof GtmProfileSchema>;
 
 const GtmConfigSchema = z.object({
-  accountId: z.string().min(1, "accountId is required"),
-  containerId: z.string().min(1, "containerId is required"),
-  workspaceId: z.string().min(1, "workspaceId is required"),
+  accountId: safeIdentifierSchema("accountId"),
+  containerId: safeIdentifierSchema("containerId"),
+  workspaceId: safeIdentifierSchema("workspaceId"),
   ga4MeasurementId: z.string().optional(),
   metaPixelId: z.string().optional(),
   integrations: z.array(z.string()).optional(),

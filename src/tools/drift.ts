@@ -9,6 +9,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import { listTags, listTriggers, listVariables } from "../lib/gtm-cli.js";
+import {
+  getTagOpsId,
+  matchResources,
+  stripTagOpsId,
+  stripVolatileFields,
+} from "../lib/identity.js";
 import { parseSnapshot } from "../types/schemas.js";
 import type { GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 import type { GtmSnapshot } from "./snapshot.js";
@@ -33,20 +39,7 @@ type ComparableValue =
 
 const DEFAULT_SNAPSHOT_PATH = "gtm-snapshot.json";
 
-const IGNORED_RESOURCE_KEYS = new Set([
-  "accountId",
-  "containerId",
-  "fingerprint",
-  "path",
-  "tagId",
-  "tagManagerUrl",
-  "triggerId",
-  "variableId",
-  "workspaceId",
-]);
-
-const TAGOPS_ID_LINE = /(?:^|\n)\s*TagOps-ID:\s*([^\n\r]+)\s*(?=\n|$)/i;
-const TAGOPS_ID_LINE_GLOBAL = /(?:^|\n)\s*TagOps-ID:\s*[^\n\r]+\s*(?=\n|$)/gi;
+const IGNORED_RESOURCE_KEYS = new Set(["tagId", "tagManagerUrl", "triggerId", "variableId"]);
 
 export interface DriftedResource {
   name: string;
@@ -148,21 +141,6 @@ const VARIABLE_DESCRIPTOR: ResourceDescriptor<GtmVariable> = {
 };
 
 const RESOURCE_DESCRIPTORS = [TAG_DESCRIPTOR, TRIGGER_DESCRIPTOR, VARIABLE_DESCRIPTOR] as const;
-
-export function getTagOpsId(notes?: string): string | undefined {
-  const match = notes?.match(TAGOPS_ID_LINE);
-  const value = match?.[1]?.trim();
-  return value && value.length > 0 ? value : undefined;
-}
-
-export function stripTagOpsId(notes?: string): string | undefined {
-  if (!notes) return undefined;
-  const cleaned = notes
-    .replace(TAGOPS_ID_LINE_GLOBAL, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return cleaned.length > 0 ? cleaned : undefined;
-}
 
 export function getResourceClassification(item: { notes?: string }): DriftClassification {
   return getTagOpsId(item.notes) ? "managed" : "unmanaged";
@@ -414,9 +392,12 @@ function compareCollection<T extends DriftResource>(
   const liveItems = descriptor.select(liveSnapshot);
   const matchedLiveItems = new Set<T>();
 
-  for (const snapshotItem of snapshotItems) {
-    const liveItem = findMatchingResource(snapshotItem, liveItems, descriptor.idKey);
-
+  for (const { source: snapshotItem, target: liveItem } of matchResources(
+    snapshotItems,
+    liveItems,
+    descriptor.idKey,
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!liveItem) {
       deletedResources.push(toDeletedResource(descriptor.type, snapshotItem));
       continue;
@@ -470,32 +451,11 @@ function compareCollection<T extends DriftResource>(
   }
 }
 
-function findMatchingResource<T extends DriftResource & { name: string; notes?: string }>(
-  snapshotItem: T,
-  liveItems: T[],
-  idKey: keyof T,
-): T | undefined {
-  const snapshotTagOpsId = getTagOpsId(snapshotItem.notes);
-  if (snapshotTagOpsId) {
-    const byTagOpsId = liveItems.find((item) => getTagOpsId(item.notes) === snapshotTagOpsId);
-    if (byTagOpsId) return byTagOpsId;
-  }
-
-  const snapshotId = snapshotItem[idKey];
-  if (typeof snapshotId === "string" && snapshotId.length > 0) {
-    const byId = liveItems.find((item) => item[idKey] === snapshotId);
-    if (byId) return byId;
-  }
-
-  const byName = liveItems.filter((item) => item.name === snapshotItem.name);
-  return byName.length === 1 ? byName[0] : undefined;
-}
-
 function normalizeResource(
   resource: DriftResource,
   resourceType: DriftResourceType,
 ): ComparableValue {
-  const base = structuredClone(resource as unknown as Record<string, unknown>);
+  const base = stripVolatileFields(resource, ["tagId", "tagManagerUrl", "triggerId", "variableId"]);
 
   if (resourceType === "tag" && base.paused === undefined) {
     base.paused = false;
@@ -503,6 +463,8 @@ function normalizeResource(
 
   return (normalizeComparableValue(base) ?? {}) as ComparableValue;
 }
+
+export { getTagOpsId, stripTagOpsId };
 
 function normalizeComparableValue(value: unknown): ComparableValue | undefined {
   if (value === undefined || value === null) return undefined;

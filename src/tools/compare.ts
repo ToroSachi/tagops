@@ -11,8 +11,8 @@
 
 import chalk from "chalk";
 import { loadConfig } from "../lib/config.js";
-import { tagmanager } from "@googleapis/tagmanager";
-import { getAuthClient } from "../lib/auth.js";
+import { getTagOpsId } from "../lib/identity.js";
+import { listTags, listTriggers, listVariables } from "../lib/gtm-cli.js";
 import type { GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 export interface ContainerSnapshot {
@@ -43,72 +43,33 @@ export interface ResourceDiff {
 }
 
 const IGNORED_RESOURCE_KEYS = new Set([
+  "accountId",
+  "containerId",
   "tagId",
+  "tagManagerUrl",
   "triggerId",
   "variableId",
   "fingerprint",
   "notes",
   "path",
+  "workspaceId",
 ]);
 
 type ComparableValue = any;
+
+function coerceArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
 
 /**
  * Fetch all resources from a specific profile's container.
  */
 async function fetchContainerResources(profileName: string): Promise<ContainerSnapshot> {
   const config = loadConfig(profileName);
-  const auth = await getAuthClient();
-  // Type assertion at library boundary — our auth types are runtime-compatible with googleapis
-  const gtm = tagmanager({
-    version: "v2",
-    auth: auth as unknown as Parameters<typeof tagmanager>[0]["auth"],
-  });
-  const parent = `accounts/${config.accountId}/containers/${config.containerId}/workspaces/${config.workspaceId}`;
-
-  const listTags = async (): Promise<GtmTag[]> => {
-    const tags: GtmTag[] = [];
-    let pageToken: string | undefined;
-
-    do {
-      const res = await gtm.accounts.containers.workspaces.tags.list({ parent, pageToken });
-      tags.push(...((res.data.tag as GtmTag[]) || []));
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-
-    return tags;
-  };
-
-  const listTriggers = async (): Promise<GtmTrigger[]> => {
-    const triggers: GtmTrigger[] = [];
-    let pageToken: string | undefined;
-
-    do {
-      const res = await gtm.accounts.containers.workspaces.triggers.list({ parent, pageToken });
-      triggers.push(...((res.data.trigger as GtmTrigger[]) || []));
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-
-    return triggers;
-  };
-
-  const listVariables = async (): Promise<GtmVariable[]> => {
-    const variables: GtmVariable[] = [];
-    let pageToken: string | undefined;
-
-    do {
-      const res = await gtm.accounts.containers.workspaces.variables.list({ parent, pageToken });
-      variables.push(...((res.data.variable as GtmVariable[]) || []));
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-
-    return variables;
-  };
-
   const [tags, triggers, variables] = await Promise.all([
-    listTags(),
-    listTriggers(),
-    listVariables(),
+    listTags(profileName),
+    listTriggers(profileName),
+    listVariables(profileName),
   ]);
 
   return {
@@ -116,9 +77,9 @@ async function fetchContainerResources(profileName: string): Promise<ContainerSn
     accountId: config.accountId,
     containerId: config.containerId,
     workspaceId: config.workspaceId,
-    tags,
-    triggers,
-    variables,
+    tags: coerceArray<GtmTag>(tags),
+    triggers: coerceArray<GtmTrigger>(triggers),
+    variables: coerceArray<GtmVariable>(variables),
   };
 }
 
@@ -126,8 +87,7 @@ async function fetchContainerResources(profileName: string): Promise<ContainerSn
  * Extract a stable matching key from notes when available, falling back to name.
  */
 export function getResourceKey(item: { name: string; notes?: string }): string {
-  const match = item.notes?.match(/TagOps-ID:\s*([^\n\r]+)/i);
-  return match?.[1]?.trim() || item.name;
+  return getTagOpsId(item.notes) ?? item.name;
 }
 
 function normalizeComparableValue(value: unknown): ComparableValue {

@@ -40,6 +40,11 @@ import {
 } from "./lib/architecture.js";
 import { loadConfig } from "./lib/config.js";
 import { auditWorkspace } from "./tools/audit.js";
+import { plan } from "./tools/plan.js";
+import { detectDrift } from "./tools/drift.js";
+import { evaluatePolicies, loadPoliciesFromConfig } from "./lib/policies.js";
+import { listVersionHistory, rollback } from "./tools/rollback.js";
+import { promote } from "./tools/promote.js";
 import type { GtmTag, GtmTrigger, PixelResult } from "./types/gtm.js";
 
 // ──────────────────────────────────────────────
@@ -106,6 +111,312 @@ function isHtmlPayloadSafe(html: string): { safe: boolean; reason?: string } {
 
   return { safe: true };
 }
+
+function asJsonContent(value: unknown) {
+  return [{ type: "text" as const, text: JSON.stringify(value, null, 2) }];
+}
+
+function okResult<T extends object>(structuredContent: T) {
+  const payload = structuredContent as unknown as Record<string, unknown>;
+  return {
+    content: asJsonContent(payload),
+    structuredContent: payload,
+  };
+}
+
+function errorResult(message: string) {
+  return {
+    content: asJsonContent({ error: message }),
+    structuredContent: { error: message },
+    isError: true,
+  };
+}
+
+const toolErrorSchema = z.object({
+  error: z.string().describe("Useful error message explaining why the tool call failed."),
+});
+
+const planActionSchema = z.object({
+  action: z.enum(["create", "update", "delete"]),
+  resourceType: z.enum(["tag", "trigger", "variable", "folder"]),
+  id: z.string(),
+  name: z.string(),
+  changes: z.array(z.string()).optional(),
+  detail: z.string().optional(),
+});
+
+const resourcePlanCountsSchema = z.object({
+  current: z.number().int().nonnegative(),
+  snapshot: z.number().int().nonnegative(),
+  create: z.number().int().nonnegative(),
+  update: z.number().int().nonnegative(),
+  delete: z.number().int().nonnegative(),
+  unchanged: z.number().int().nonnegative(),
+});
+
+const planResultSchema = z.object({
+  snapshotFile: z.string(),
+  snapshotTimestamp: z.string(),
+  actions: z.array(planActionSchema),
+  resourceCounts: z.object({
+    tags: resourcePlanCountsSchema,
+    triggers: resourcePlanCountsSchema,
+    variables: resourcePlanCountsSchema,
+    folders: resourcePlanCountsSchema,
+    total: resourcePlanCountsSchema,
+  }),
+  safetyWarnings: z.array(z.string()),
+  riskLevel: z.enum(["low", "medium", "high", "critical"]),
+});
+
+const driftResourceTypeSchema = z.enum(["tag", "trigger", "variable"]);
+const driftClassificationSchema = z.enum(["managed", "unmanaged"]);
+
+const driftedResourceSchema = z.object({
+  name: z.string(),
+  type: driftResourceTypeSchema,
+  resourceType: driftResourceTypeSchema,
+  field: z.string(),
+  oldValue: z.any(),
+  newValue: z.any(),
+  classification: driftClassificationSchema,
+  changeType: z.enum(["added", "modified"]),
+  id: z.string().optional(),
+  gtmType: z.string().optional(),
+  tagOpsId: z.string().optional(),
+});
+
+const driftResourceSummarySchema = z.object({
+  name: z.string(),
+  type: driftResourceTypeSchema,
+  resourceType: driftResourceTypeSchema,
+  classification: driftClassificationSchema,
+  changeType: z.enum(["added", "modified"]),
+  fields: z.array(z.string()),
+  id: z.string().optional(),
+  gtmType: z.string().optional(),
+  tagOpsId: z.string().optional(),
+});
+
+const deletedResourceSchema = z.object({
+  name: z.string(),
+  type: driftResourceTypeSchema,
+  resourceType: driftResourceTypeSchema,
+  classification: driftClassificationSchema,
+  id: z.string().optional(),
+  gtmType: z.string().optional(),
+  tagOpsId: z.string().optional(),
+});
+
+const driftReportSchema = z.object({
+  snapshotFile: z.string(),
+  snapshotTimestamp: z.string(),
+  driftedResources: z.array(driftedResourceSchema),
+  unmanagedResources: z.array(driftResourceSummarySchema),
+  deletedResources: z.array(deletedResourceSchema),
+  summary: z.object({
+    totalChanges: z.number().int().nonnegative(),
+    driftedFields: z.number().int().nonnegative(),
+    driftedResources: z.number().int().nonnegative(),
+    unmanagedResources: z.number().int().nonnegative(),
+    deletedResources: z.number().int().nonnegative(),
+    managedChanges: z.number().int().nonnegative(),
+    unmanagedChanges: z.number().int().nonnegative(),
+  }),
+});
+
+const policyViolationSchema = z.object({
+  policyId: z.string(),
+  policyName: z.string(),
+  severity: z.enum(["error", "warning", "info"]),
+  category: z.enum(["consent", "firing", "naming", "security", "performance", "vendor"]),
+  resourceType: z.enum(["tag", "trigger", "workspace"]),
+  resourceId: z.string(),
+  resourceName: z.string(),
+  message: z.string(),
+});
+
+const policyReportSchema = z.object({
+  timestamp: z.string(),
+  enabledPolicies: z.array(z.string()),
+  violations: z.array(policyViolationSchema),
+  passed: z.boolean(),
+  summary: z.object({
+    errors: z.number().int().nonnegative(),
+    warnings: z.number().int().nonnegative(),
+    info: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  resources: z.object({
+    tags: z.number().int().nonnegative(),
+    triggers: z.number().int().nonnegative(),
+    variables: z.number().int().nonnegative(),
+  }),
+});
+
+const workspaceStatusSchema = z.object({
+  synced: z.boolean(),
+  mergeConflictCount: z.number().int().nonnegative(),
+  pendingChangeCount: z.number().int().nonnegative(),
+  mergeConflict: z.array(z.record(z.unknown())),
+  workspaceChange: z.array(z.record(z.unknown())),
+});
+
+const workspaceSchema = z
+  .object({
+    workspaceId: z.string().optional(),
+    name: z.string().optional(),
+    description: z.string().optional(),
+    path: z.string().optional(),
+    fingerprint: z.string().optional(),
+    tagManagerUrl: z.string().optional(),
+  })
+  .passthrough();
+
+const workspaceCreateResultSchema = z.object({
+  created: z.literal(true),
+  workspaceId: z.string().optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  path: z.string().optional(),
+  workspace: workspaceSchema,
+});
+
+const versionHeaderSchema = z.object({
+  containerVersionId: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  numTags: z.string().optional(),
+  numTriggers: z.string().optional(),
+  numVariables: z.string().optional(),
+  deleted: z.boolean().optional(),
+  fingerprint: z.string().optional(),
+  path: z.string(),
+});
+
+const versionHistoryEntrySchema = versionHeaderSchema.extend({
+  isLive: z.boolean(),
+  publishedAt: z.string().optional(),
+});
+
+const versionHistoryResultSchema = z.object({
+  limit: z.number().int().positive(),
+  liveVersionId: z.string().optional(),
+  publishDatesAvailable: z.boolean(),
+  versions: z.array(versionHistoryEntrySchema),
+});
+
+const rollbackChangeSchema = z.object({
+  field: z.enum(["name", "description", "numTags", "numTriggers", "numVariables"]),
+  label: z.string(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  changed: z.boolean(),
+});
+
+const rollbackResultSchema = z.object({
+  dryRun: z.boolean(),
+  versionId: z.string(),
+  targetVersion: versionHeaderSchema.optional(),
+  currentLiveVersion: versionHeaderSchema.nullable().optional(),
+  publishedVersion: versionHeaderSchema.nullable().optional(),
+  changes: z.array(rollbackChangeSchema),
+  published: z.boolean(),
+  error: z.string().optional(),
+});
+
+const resourceDiffSchema = z.object({
+  name: z.string(),
+  status: z.enum(["only_in_source", "only_in_target", "different", "identical"]),
+  sourceId: z.string().optional(),
+  targetId: z.string().optional(),
+  differences: z.array(z.string()).optional(),
+});
+
+const compareResultSchema = z.object({
+  sourceProfile: z.string(),
+  targetProfile: z.string(),
+  tags: z.array(resourceDiffSchema),
+  triggers: z.array(resourceDiffSchema),
+  variables: z.array(resourceDiffSchema),
+  summary: z.string(),
+});
+
+const promotionEnvironmentSchema = z.enum(["development", "staging", "production"]);
+
+const promotionPlanSectionSchema = z.object({
+  create: z.array(resourceDiffSchema),
+  update: z.array(resourceDiffSchema),
+  targetOnly: z.array(resourceDiffSchema),
+  identical: z.number().int().nonnegative(),
+});
+
+const promotionPlanSchema = z.object({
+  sourceProfile: z.string(),
+  targetProfile: z.string(),
+  sourceEnvironment: promotionEnvironmentSchema,
+  targetEnvironment: promotionEnvironmentSchema,
+  allowedFlow: z.array(promotionEnvironmentSchema),
+  compare: compareResultSchema,
+  tags: promotionPlanSectionSchema,
+  triggers: promotionPlanSectionSchema,
+  variables: promotionPlanSectionSchema,
+  totals: z.object({
+    create: z.number().int().nonnegative(),
+    update: z.number().int().nonnegative(),
+    apply: z.number().int().nonnegative(),
+    targetOnly: z.number().int().nonnegative(),
+    identical: z.number().int().nonnegative(),
+  }),
+  publishRequested: z.boolean(),
+  versionName: z.string().optional(),
+  versionDescription: z.string().optional(),
+  risk: z.object({
+    level: z.enum(["low", "medium", "high"]),
+    reasons: z.array(z.string()),
+  }),
+  warnings: z.array(z.string()),
+});
+
+const syncResultSchema = z.object({
+  variablesCreated: z.number().int().nonnegative(),
+  variablesUpdated: z.number().int().nonnegative(),
+  triggersCreated: z.number().int().nonnegative(),
+  triggersUpdated: z.number().int().nonnegative(),
+  tagsCreated: z.number().int().nonnegative(),
+  tagsUpdated: z.number().int().nonnegative(),
+  errors: z.array(z.string()),
+});
+
+const publishResultSchema = z.object({
+  dryRun: z.boolean(),
+  versionName: z.string(),
+  versionDescription: z.string(),
+  versionId: z.string().optional(),
+  published: z.boolean(),
+  error: z.string().optional(),
+  compilerError: z.boolean().nullable().optional(),
+  syncStatus: z.record(z.unknown()).optional(),
+});
+
+const promotionResultSchema = z.object({
+  dryRun: z.boolean(),
+  applied: z.boolean(),
+  published: z.boolean(),
+  plan: promotionPlanSchema,
+  syncResult: syncResultSchema.optional(),
+  publishResult: publishResultSchema.optional(),
+  errors: z.array(z.string()),
+});
+
+const planToolOutputSchema = z.union([planResultSchema, toolErrorSchema]);
+const driftToolOutputSchema = z.union([driftReportSchema, toolErrorSchema]);
+const policyToolOutputSchema = z.union([policyReportSchema, toolErrorSchema]);
+const workspaceStatusToolOutputSchema = z.union([workspaceStatusSchema, toolErrorSchema]);
+const workspaceCreateToolOutputSchema = z.union([workspaceCreateResultSchema, toolErrorSchema]);
+const versionHistoryToolOutputSchema = z.union([versionHistoryResultSchema, toolErrorSchema]);
+const rollbackToolOutputSchema = z.union([rollbackResultSchema, toolErrorSchema]);
+const promotionToolOutputSchema = z.union([promotionResultSchema, toolErrorSchema]);
 
 const server = new McpServer({
   name: "tagops-server",
@@ -288,6 +599,240 @@ if (!IS_READ_ONLY) {
     },
   );
 }
+
+// --- Plan workspace restore from a snapshot ---
+server.registerTool(
+  "gtm_plan_restore",
+  {
+    description:
+      "Preview how the current GTM workspace would be restored to match a saved snapshot. This does not apply changes. Returns create/update/delete actions, counts, safety warnings, and a risk level.",
+    inputSchema: {
+      snapshot_path: z
+        .string()
+        .min(1)
+        .describe("Path to the GTM snapshot JSON file to compare against the current workspace."),
+    },
+    outputSchema: planToolOutputSchema,
+  },
+  async ({ snapshot_path }) => {
+    try {
+      return okResult(await plan(snapshot_path));
+    } catch (err) {
+      return errorResult((err as Error).message);
+    }
+  },
+);
+
+// --- Detect drift against a snapshot ---
+server.registerTool(
+  "gtm_detect_drift",
+  {
+    description:
+      "Detect semantic drift between a saved GTM snapshot and the live workspace. Reports managed drift, unmanaged additions, deleted resources, and summary counts.",
+    inputSchema: {
+      snapshot_path: z
+        .string()
+        .optional()
+        .describe(
+          "Optional path to the GTM snapshot JSON file. Defaults to gtm-snapshot.json in the current directory.",
+        ),
+    },
+    outputSchema: driftToolOutputSchema,
+  },
+  async ({ snapshot_path }) => {
+    try {
+      return okResult(await detectDrift(snapshot_path));
+    } catch (err) {
+      return errorResult((err as Error).message);
+    }
+  },
+);
+
+// --- Run policy checks ---
+server.registerTool(
+  "gtm_policy_check",
+  {
+    description:
+      "Run TagOps governance policies against the current GTM workspace. Loads the default policy config unless a custom config path is provided and returns violations with severity counts.",
+    inputSchema: {
+      config_path: z
+        .string()
+        .optional()
+        .describe(
+          "Optional path to a policy config JSON file. Defaults to .tagops-policies.json if present.",
+        ),
+    },
+    outputSchema: policyToolOutputSchema,
+  },
+  async ({ config_path }) => {
+    try {
+      const [tags, triggers, variables] = await Promise.all([
+        listTags(),
+        listTriggers(),
+        listVariables(),
+      ]);
+
+      if (tags.length === 0 && triggers.length === 0) {
+        throw new Error("Cannot connect to GTM. Run: tagops auth login");
+      }
+
+      const policies = loadPoliciesFromConfig(config_path);
+      return okResult(evaluatePolicies(tags, triggers, variables, policies));
+    } catch (err) {
+      return errorResult((err as Error).message);
+    }
+  },
+);
+
+// --- Inspect current workspace sync status ---
+server.registerTool(
+  "gtm_workspace_status",
+  {
+    description:
+      "Get the current GTM draft workspace sync state. Returns whether the workspace is synced plus merge conflicts and pending workspace changes.",
+    inputSchema: {},
+    outputSchema: workspaceStatusToolOutputSchema,
+  },
+  async () => {
+    try {
+      const { getWorkspaceStatus } = await import("./lib/gtm-cli.js");
+      const status = await getWorkspaceStatus();
+      return okResult({
+        synced: status.synced,
+        mergeConflictCount: status.mergeConflict.length,
+        pendingChangeCount: status.workspaceChange.length,
+        mergeConflict: status.mergeConflict,
+        workspaceChange: status.workspaceChange,
+      });
+    } catch (err) {
+      return errorResult((err as Error).message);
+    }
+  },
+);
+
+// --- Create a new workspace ---
+if (!IS_READ_ONLY) {
+  server.registerTool(
+    "gtm_workspace_create",
+    {
+      description:
+        "Create a new isolated GTM draft workspace for safe changes. Returns the created workspace metadata including the new workspace ID.",
+      inputSchema: {
+        name: z.string().min(1).describe("Human-readable name for the new draft workspace."),
+        description: z
+          .string()
+          .optional()
+          .describe("Optional description explaining the workspace purpose."),
+      },
+      outputSchema: workspaceCreateToolOutputSchema,
+    },
+    async ({ name, description }) => {
+      try {
+        const { createWorkspace } = await import("./lib/gtm-cli.js");
+        const workspace = await createWorkspace(name, description);
+        return okResult({
+          created: true as const,
+          workspaceId: workspace.workspaceId ?? undefined,
+          name: workspace.name ?? undefined,
+          description: workspace.description ?? undefined,
+          path: workspace.path ?? undefined,
+          workspace,
+        });
+      } catch (err) {
+        return errorResult((err as Error).message);
+      }
+    },
+  );
+}
+
+// --- List recent versions ---
+server.registerTool(
+  "gtm_list_versions",
+  {
+    description:
+      "List recent GTM container versions, including which version is currently live. Useful before rollback or release decisions.",
+    inputSchema: {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Maximum number of recent versions to return. Defaults to 10."),
+    },
+    outputSchema: versionHistoryToolOutputSchema,
+  },
+  async ({ limit }) => {
+    try {
+      return okResult(await listVersionHistory(limit));
+    } catch (err) {
+      return errorResult((err as Error).message);
+    }
+  },
+);
+
+// --- Roll back to a previous version ---
+server.registerTool(
+  "gtm_rollback",
+  {
+    description:
+      "Roll the live GTM container back to a previous published version, or preview the rollback in dry-run mode. Returns the target version, current live version, and a change summary.",
+    inputSchema: {
+      version_id: z.string().min(1).describe("Container version ID to roll back to."),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe("If true, preview the rollback without publishing the target version."),
+    },
+    outputSchema: rollbackToolOutputSchema,
+  },
+  async ({ version_id, dry_run }) => {
+    try {
+      if (IS_READ_ONLY && !dry_run) {
+        return errorResult("Server is running in --read-only mode. Rollback publish is disabled.");
+      }
+
+      return okResult(await rollback(version_id, { dryRun: dry_run }));
+    } catch (err) {
+      return errorResult((err as Error).message);
+    }
+  },
+);
+
+// --- Promote one profile into another ---
+server.registerTool(
+  "gtm_promote",
+  {
+    description:
+      "Promote GTM changes from a source profile into a target profile. In dry-run mode it returns the promotion plan only. In apply mode it syncs create/update changes into the target profile without deleting target-only drift.",
+    inputSchema: {
+      source_profile: z.string().min(1).describe("Source profile name from .gtmrc.json."),
+      target_profile: z.string().min(1).describe("Target profile name from .gtmrc.json."),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe("If true, return the promotion plan without applying any changes."),
+    },
+    outputSchema: promotionToolOutputSchema,
+  },
+  async ({ source_profile, target_profile, dry_run }) => {
+    try {
+      if (IS_READ_ONLY && !dry_run) {
+        return errorResult("Server is running in --read-only mode. Promotion apply is disabled.");
+      }
+
+      return okResult(
+        await promote(source_profile, target_profile, {
+          dryRun: dry_run,
+          force: true,
+          silent: true,
+        }),
+      );
+    } catch (err) {
+      return errorResult((err as Error).message);
+    }
+  },
+);
 
 // --- Audit workspace ---
 server.tool(

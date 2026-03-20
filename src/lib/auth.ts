@@ -16,6 +16,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { getSafeErrorMessage } from "./redaction.js";
 
 // ── OAuth2 Configuration ──
 // Google's public "Desktop app" OAuth client — used by gcloud and other CLIs.
@@ -206,7 +207,7 @@ export async function checkAuthStatus(): Promise<{
     const email = await getCurrentAuthenticatedEmail().catch(() => undefined);
     return { authenticated: true, method, email };
   } catch (err: unknown) {
-    return { authenticated: false, method: "none", error: (err as Error).message };
+    return { authenticated: false, method: "none", error: getSafeErrorMessage(err) };
   }
 }
 
@@ -298,10 +299,11 @@ export async function loginWithOAuth(): Promise<{
         server.close();
         resolveLogin({ success: true });
       } catch (err) {
+        const safeMessage = getSafeErrorMessage(err);
         res.writeHead(500, { "Content-Type": "text/html" });
-        res.end(`<html><body><h2>Error</h2><p>${(err as Error).message}</p></body></html>`);
+        res.end(`<html><body><h2>Error</h2><p>${safeMessage}</p></body></html>`);
         server.close();
-        resolveLogin({ success: false, error: (err as Error).message });
+        resolveLogin({ success: false, error: safeMessage });
       }
     });
 
@@ -409,7 +411,7 @@ export async function importFromGtmCli(): Promise<{ success: boolean; message: s
   } catch (err) {
     return {
       success: false,
-      message: `Failed to import credentials: ${(err as Error).message}\nRun \`tagops auth login\` instead.`,
+      message: `Failed to import credentials: ${getSafeErrorMessage(err)}\nRun \`tagops auth login\` instead.`,
     };
   }
 }

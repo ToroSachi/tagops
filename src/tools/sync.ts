@@ -8,7 +8,7 @@
 
 import chalk from "chalk";
 import { type GtmTag, type GtmTrigger, type GtmVariable } from "../types/gtm.js";
-import { loadConfig } from "../lib/config.js";
+import { configureApiConcurrency } from "../lib/concurrency.js";
 import {
   buildCompleteTagConfig,
   createVariable,
@@ -17,9 +17,12 @@ import {
   updateTrigger,
   createTag,
   updateTag,
-  getGtmClient,
+  listTags,
+  listTriggers,
+  listVariables,
 } from "../lib/gtm-cli.js";
 import { requireWriteAccess } from "../lib/permission-guard.js";
+import { getSafeErrorMessage } from "../lib/redaction.js";
 import { compareContainers } from "./compare.js";
 import * as readline from "node:readline";
 
@@ -48,12 +51,17 @@ type SyncVariable = GtmVariable & {
   parentFolderId?: string;
 };
 
+function coerceArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
 export interface SyncOptions {
   source: string;
   target: string;
   dryRun?: boolean;
   force?: boolean;
   silent?: boolean;
+  concurrency?: number;
 }
 
 export interface SyncResult {
@@ -84,59 +92,16 @@ async function fetchFullState(profileName: string): Promise<{
   triggers: SyncTrigger[];
   variables: SyncVariable[];
 }> {
-  const config = loadConfig(profileName);
-  const gtm = await getGtmClient();
-  const parent = `accounts/${config.accountId}/containers/${config.containerId}/workspaces/${config.workspaceId}`;
-
-  const listTags = async (): Promise<SyncTag[]> => {
-    const tags: SyncTag[] = [];
-    let pageToken: string | undefined;
-
-    do {
-      const res = await gtm.accounts.containers.workspaces.tags.list({ parent, pageToken });
-      tags.push(...((res.data.tag as SyncTag[]) || []));
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-
-    return tags;
-  };
-
-  const listTriggers = async (): Promise<SyncTrigger[]> => {
-    const triggers: SyncTrigger[] = [];
-    let pageToken: string | undefined;
-
-    do {
-      const res = await gtm.accounts.containers.workspaces.triggers.list({ parent, pageToken });
-      triggers.push(...((res.data.trigger as SyncTrigger[]) || []));
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-
-    return triggers;
-  };
-
-  const listVariables = async (): Promise<SyncVariable[]> => {
-    const variables: SyncVariable[] = [];
-    let pageToken: string | undefined;
-
-    do {
-      const res = await gtm.accounts.containers.workspaces.variables.list({ parent, pageToken });
-      variables.push(...((res.data.variable as SyncVariable[]) || []));
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-
-    return variables;
-  };
-
   const [tags, triggers, variables] = await Promise.all([
-    listTags(),
-    listTriggers(),
-    listVariables(),
+    listTags(profileName),
+    listTriggers(profileName),
+    listVariables(profileName),
   ]);
 
   return {
-    tags,
-    triggers,
-    variables,
+    tags: coerceArray<SyncTag>(tags),
+    triggers: coerceArray<SyncTrigger>(triggers),
+    variables: coerceArray<SyncVariable>(variables),
   };
 }
 
@@ -239,6 +204,8 @@ function buildTagRequestBody(
 }
 
 export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
+  configureApiConcurrency(opts.concurrency);
+
   const log = (...args: unknown[]) => {
     if (!opts.silent) {
       console.log(...args);
@@ -366,8 +333,9 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
         }
       }
     } catch (err: any) {
-      result.errors.push(err.message);
-      log(`  ${chalk.red("✖")} ${diff.name}: ${err.message}`);
+      const safeMessage = getSafeErrorMessage(err);
+      result.errors.push(safeMessage);
+      log(`  ${chalk.red("✖")} ${diff.name}: ${safeMessage}`);
     }
   }
 
@@ -412,8 +380,9 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
         }
       }
     } catch (err: any) {
-      result.errors.push(err.message);
-      log(`  ${chalk.red("✖")} Trigger ${diff.name}: ${err.message}`);
+      const safeMessage = getSafeErrorMessage(err);
+      result.errors.push(safeMessage);
+      log(`  ${chalk.red("✖")} Trigger ${diff.name}: ${safeMessage}`);
     }
   }
 
@@ -457,8 +426,9 @@ export async function syncContainers(opts: SyncOptions): Promise<SyncResult> {
         log(`  ${chalk.cyan("~")} Updated: ${sourceTag.name}`);
       }
     } catch (err: any) {
-      result.errors.push(err.message);
-      log(`  ${chalk.red("✖")} Tag ${diff.name}: ${err.message}`);
+      const safeMessage = getSafeErrorMessage(err);
+      result.errors.push(safeMessage);
+      log(`  ${chalk.red("✖")} Tag ${diff.name}: ${safeMessage}`);
     }
   }
 

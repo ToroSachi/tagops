@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 const compareContainers = vi.fn();
-const loadConfig = vi.fn();
-const getGtmClient = vi.fn();
+const listTags = vi.fn();
+const listTriggers = vi.fn();
+const listVariables = vi.fn();
 const createVariable = vi.fn();
 const updateVariable = vi.fn();
 const createTrigger = vi.fn();
@@ -15,22 +16,20 @@ vi.mock("../tools/compare.js", () => ({
   compareContainers,
 }));
 
-vi.mock("../lib/config.js", () => ({
-  loadConfig,
-}));
-
 vi.mock("../lib/gtm-cli.js", () => ({
   buildCompleteTagConfig: vi.fn((tag: object, overrides: Record<string, unknown> = {}) => ({
     ...(structuredClone(tag) as Record<string, unknown>),
     ...overrides,
   })),
+  listTags,
+  listTriggers,
+  listVariables,
   createVariable,
   updateVariable,
   createTrigger,
   updateTrigger,
   createTag,
   updateTag,
-  getGtmClient,
 }));
 
 vi.mock("../lib/permission-guard.js", () => ({
@@ -182,59 +181,17 @@ describe("syncContainers", () => {
     } as GtmVariable,
   ];
 
-  const makeClient = () =>
-    ({
-      accounts: {
-        containers: {
-          workspaces: {
-            tags: {
-              list: vi.fn(async ({ parent }: { parent: string }) => ({
-                data: { tag: parent.includes("source") ? sourceTags : targetTags },
-              })),
-            },
-            triggers: {
-              list: vi.fn(async ({ parent }: { parent: string }) => ({
-                data: { trigger: parent.includes("source") ? sourceTriggers : targetTriggers },
-              })),
-            },
-            variables: {
-              list: vi.fn(async ({ parent }: { parent: string }) => ({
-                data: { variable: parent.includes("source") ? sourceVariables : targetVariables },
-              })),
-            },
-          },
-        },
-      },
-    }) as any;
-
   beforeEach(() => {
     vi.clearAllMocks();
-
-    loadConfig.mockImplementation((profileName?: string) => {
-      if (profileName === "source") {
-        return {
-          accountId: "source-account",
-          containerId: "source-container",
-          workspaceId: "source-workspace",
-        };
-      }
-
-      if (profileName === "target") {
-        return {
-          accountId: "target-account",
-          containerId: "target-container",
-          workspaceId: "target-workspace",
-        };
-      }
-
-      return {
-        accountId: "default-account",
-        containerId: "default-container",
-        workspaceId: "default-workspace",
-      };
-    });
-
-    getGtmClient.mockResolvedValue(makeClient());
+    listTags.mockImplementation(async (profileName?: string) =>
+      profileName === "source" ? sourceTags : targetTags,
+    );
+    listTriggers.mockImplementation(async (profileName?: string) =>
+      profileName === "source" ? sourceTriggers : targetTriggers,
+    );
+    listVariables.mockImplementation(async (profileName?: string) =>
+      profileName === "source" ? sourceVariables : targetVariables,
+    );
 
     compareContainers.mockResolvedValue({
       sourceProfile: "source",
@@ -361,5 +318,59 @@ describe("syncContainers", () => {
         }),
       }),
     );
+  });
+
+  it("redacts sensitive API details in sync errors", async () => {
+    createVariable.mockRejectedValue(new Error("access_token=secret-token Bearer abc.def"));
+
+    compareContainers.mockResolvedValue({
+      sourceProfile: "source",
+      targetProfile: "target",
+      tags: [],
+      triggers: [],
+      variables: [
+        { name: "DLV - Ecommerce Value", status: "only_in_source", sourceId: "variable-source" },
+      ],
+      summary: "1 only in source",
+    });
+
+    const { syncContainers } = await import("../tools/sync.js");
+    const result = await syncContainers({
+      source: "source",
+      target: "target",
+      force: true,
+      silent: true,
+    });
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("[REDACTED]");
+    expect(result.errors[0]).not.toContain("secret-token");
+  });
+
+  it("tolerates unexpected null list responses", async () => {
+    listTags.mockResolvedValue(null);
+    listTriggers.mockResolvedValue(null);
+    listVariables.mockResolvedValue(null);
+
+    compareContainers.mockResolvedValue({
+      sourceProfile: "source",
+      targetProfile: "target",
+      tags: [],
+      triggers: [],
+      variables: [],
+      summary: "0 differ",
+    });
+
+    const { syncContainers } = await import("../tools/sync.js");
+    const result = await syncContainers({
+      source: "source",
+      target: "target",
+      force: true,
+      silent: true,
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.tagsCreated).toBe(0);
+    expect(result.variablesCreated).toBe(0);
   });
 });

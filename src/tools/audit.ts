@@ -20,6 +20,7 @@
 import chalk from "chalk";
 import crypto from "crypto";
 import { confirm } from "@inquirer/prompts";
+import { getSafeErrorMessage } from "../lib/redaction.js";
 import {
   listTags,
   listTriggers,
@@ -678,7 +679,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       console.log(JSON.stringify(report, null, 2));
     })
     .catch((err) => {
-      console.error(err);
+      console.error(getSafeErrorMessage(err));
       process.exit(1);
     });
 }

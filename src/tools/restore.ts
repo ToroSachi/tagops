@@ -11,6 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
+import { configureApiConcurrency } from "../lib/concurrency.js";
 import {
   buildCompleteTagConfig,
   createFolder,
@@ -30,6 +31,7 @@ import {
   deleteVariable,
 } from "../lib/gtm-cli.js";
 import { BUILTIN_TRIGGER_IDS } from "../lib/architecture.js";
+import { getTagOpsId, matchResources, stripTagOpsId } from "../lib/identity.js";
 import { requireWriteAccess } from "../lib/permission-guard.js";
 import { parseSnapshot } from "../types/schemas.js";
 import type { GtmSnapshot } from "./snapshot.js";
@@ -64,6 +66,10 @@ type RestorableFolder = Partial<GtmFolder> & {
   notes?: string;
 };
 
+function coerceArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
 export interface RestoreAction {
   action: "create" | "update" | "delete" | "skip";
   resourceType: "folder" | "tag" | "trigger" | "variable";
@@ -95,21 +101,7 @@ export interface RestoreResult {
 export interface RestoreOptions {
   dryRun: boolean;
   allowDelete: boolean;
-}
-
-function getTagOpsId(notes?: string): string | undefined {
-  if (!notes) return undefined;
-  const match = notes.match(/TagOps-ID:\s*([^\n\r]+)/i);
-  return match?.[1]?.trim();
-}
-
-function stripTagOpsId(notes?: string): string | undefined {
-  if (!notes) return undefined;
-  const withoutId = notes
-    .replace(/(?:^|\n)\s*TagOps-ID:\s*[^\n\r]+\s*(?=\n|$)/gi, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return withoutId.length > 0 ? withoutId : undefined;
+  concurrency?: number;
 }
 
 function normalizeStringArray(values?: string[]): string[] | undefined {
@@ -146,29 +138,6 @@ function uniqueById<T extends { name: string }>(
     unique.push(item);
   }
   return unique;
-}
-
-function findMatchingResource<T extends { name: string; notes?: string }>(
-  snapshotItem: T,
-  currentItems: T[],
-  idKey: keyof T,
-): T | undefined {
-  const snapshotTagOpsId = getTagOpsId(snapshotItem.notes);
-  if (snapshotTagOpsId) {
-    const byTagOpsId = currentItems.find((item) => getTagOpsId(item.notes) === snapshotTagOpsId);
-    if (byTagOpsId) return byTagOpsId;
-  }
-
-  const snapshotId = snapshotItem[idKey];
-  if (typeof snapshotId === "string" && snapshotId.length > 0) {
-    const byId = currentItems.find((item) => item[idKey] === snapshotId);
-    if (byId) return byId;
-  }
-
-  const byName = currentItems.filter((item) => item.name === snapshotItem.name);
-  if (byName.length === 1) return byName[0];
-
-  return undefined;
 }
 
 function normalizeTag(tag: RestorableTag): Record<string, unknown> {
@@ -362,14 +331,6 @@ function sortActions(actions: RestoreAction[]): RestoreAction[] {
   return actions;
 }
 
-function resolveSnapshotIdentity<T extends { name: string; notes?: string }>(
-  snapshotItem: T,
-  currentItems: T[],
-  idKey: keyof T,
-): T | undefined {
-  return findMatchingResource(snapshotItem, currentItems, idKey);
-}
-
 async function restoreFolders(
   snapshotFolders: GtmFolder[],
   currentFolders: GtmFolder[],
@@ -388,9 +349,12 @@ async function restoreFolders(
   let failed = 0;
   const idMap = new Map<string, string>();
 
-  for (const snapshotFolder of snapshotFolders) {
-    const currentFolder = resolveSnapshotIdentity(snapshotFolder, currentFolders, "folderId");
-
+  for (const { source: snapshotFolder, target: currentFolder } of matchResources(
+    snapshotFolders,
+    currentFolders,
+    "folderId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentFolder) {
       if (dryRun) {
         actions.push({
@@ -495,8 +459,12 @@ async function restoreTags(
   let skipped = 0;
   let failed = 0;
 
-  for (const snapshotTag of snapshotTags) {
-    const currentTag = resolveSnapshotIdentity(snapshotTag, currentTags, "tagId");
+  for (const { source: snapshotTag, target: currentTag } of matchResources(
+    snapshotTags,
+    currentTags,
+    "tagId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentTag) {
       if (dryRun) {
         actions.push({
@@ -616,8 +584,12 @@ async function restoreTriggers(
   let failed = 0;
   const idMap = new Map<string, string>();
 
-  for (const snapshotTrigger of snapshotTriggers) {
-    const currentTrigger = resolveSnapshotIdentity(snapshotTrigger, currentTriggers, "triggerId");
+  for (const { source: snapshotTrigger, target: currentTrigger } of matchResources(
+    snapshotTriggers,
+    currentTriggers,
+    "triggerId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentTrigger) {
       if (dryRun) {
         actions.push({
@@ -737,12 +709,12 @@ async function restoreVariables(
   let skipped = 0;
   let failed = 0;
 
-  for (const snapshotVariable of snapshotVariables) {
-    const currentVariable = resolveSnapshotIdentity(
-      snapshotVariable,
-      currentVariables,
-      "variableId",
-    );
+  for (const { source: snapshotVariable, target: currentVariable } of matchResources(
+    snapshotVariables,
+    currentVariables,
+    "variableId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentVariable) {
       if (dryRun) {
         actions.push({
@@ -931,6 +903,8 @@ export async function restoreWorkspace(
   snapshotPath: string,
   options: RestoreOptions,
 ): Promise<RestoreResult> {
+  configureApiConcurrency(options.concurrency);
+
   if (!options.dryRun) {
     await requireWriteAccess();
   }
@@ -943,26 +917,30 @@ export async function restoreWorkspace(
   const raw = readFileSync(filePath, "utf-8");
   const snapshot = parseSnapshot(raw) as GtmSnapshot;
 
-  const [currentFolders, currentTags, currentTriggers, currentVariables] = await Promise.all([
+  const [loadedFolders, loadedTags, loadedTriggers, loadedVariables] = await Promise.all([
     listFolders(),
     listTags(),
     listTriggers(),
     listVariables(),
   ]);
+  const currentFolders = coerceArray<GtmFolder>(loadedFolders);
+  const currentTags = coerceArray<GtmTag>(loadedTags);
+  const currentTriggers = coerceArray<GtmTrigger>(loadedTriggers);
+  const currentVariables = coerceArray<GtmVariable>(loadedVariables);
 
   const actions: RestoreAction[] = [];
   const keepTagIds = new Set<string>();
   const keepTriggerIds = new Set<string>();
   const keepVariableIds = new Set<string>();
   const folderResult = await restoreFolders(
-    snapshot.folders ?? [],
+    coerceArray<GtmFolder>(snapshot.folders),
     currentFolders,
     options.dryRun,
     actions,
   );
 
   const variableResult = await restoreVariables(
-    snapshot.variables,
+    coerceArray<GtmVariable>(snapshot.variables),
     currentVariables,
     folderResult.idMap,
     options.dryRun,
@@ -970,7 +948,7 @@ export async function restoreWorkspace(
     keepVariableIds,
   );
   const triggerResult = await restoreTriggers(
-    snapshot.triggers,
+    coerceArray<GtmTrigger>(snapshot.triggers),
     currentTriggers,
     folderResult.idMap,
     options.dryRun,
@@ -978,7 +956,7 @@ export async function restoreWorkspace(
     keepTriggerIds,
   );
   const tagResult = await restoreTags(
-    snapshot.tags,
+    coerceArray<GtmTag>(snapshot.tags),
     currentTags,
     triggerResult.idMap,
     folderResult.idMap,

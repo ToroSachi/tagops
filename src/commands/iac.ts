@@ -1,6 +1,9 @@
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import chalk from "chalk";
+import { configureApiConcurrency, parseConcurrencyOption } from "../lib/concurrency.js";
+import { resolveProjectPath } from "../lib/path-safety.js";
+import { getSafeErrorMessage } from "../lib/redaction.js";
 import type { PlanRiskLevel } from "../tools/plan.js";
 
 function riskColor(riskLevel: PlanRiskLevel): (text: string) => string {
@@ -49,7 +52,10 @@ export function registerIaCCommands(program: Command) {
     .action(async (opts: { output?: string }) => {
       const { takeSnapshot, printSnapshotResult } = await import("../tools/snapshot.js");
       try {
-        const result = await takeSnapshot(opts.output);
+        const outputPath = opts.output
+          ? resolveProjectPath(opts.output, "Snapshot output")
+          : undefined;
+        const result = await takeSnapshot(outputPath);
         if (program.opts().json) {
           console.log(
             JSON.stringify({
@@ -62,13 +68,15 @@ export function registerIaCCommands(program: Command) {
               clients: result.clientCount,
               environments: result.environmentCount,
               transformations: result.transformationCount,
+              sizeBytes: result.sizeBytes,
+              warning: result.warning,
             }),
           );
         } else {
           printSnapshotResult(result);
         }
       } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
         process.exit(1);
       }
     });
@@ -83,14 +91,17 @@ export function registerIaCCommands(program: Command) {
     .action(async (opts: { snapshot?: string }) => {
       const { diffWorkspace, printDiffReport } = await import("../tools/diff.js");
       try {
-        const report = await diffWorkspace(opts.snapshot);
+        const snapshotPath = opts.snapshot
+          ? resolveProjectPath(opts.snapshot, "Snapshot")
+          : undefined;
+        const report = await diffWorkspace(snapshotPath);
         if (program.opts().json) {
           console.log(JSON.stringify(report, null, 2));
         } else {
           printDiffReport(report);
         }
       } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
         process.exit(1);
       }
     });
@@ -101,7 +112,8 @@ export function registerIaCCommands(program: Command) {
     .action(async (snapshot: string) => {
       const { plan, printPlan } = await import("../tools/plan.js");
       try {
-        const result = await plan(snapshot);
+        const snapshotPath = resolveProjectPath(snapshot, "Snapshot");
+        const result = await plan(snapshotPath);
         if (program.opts().json) {
           console.log(JSON.stringify(result, null, 2));
         } else {
@@ -109,7 +121,7 @@ export function registerIaCCommands(program: Command) {
         }
         if (result.riskLevel === "critical") process.exit(1);
       } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
         process.exit(1);
       }
     });
@@ -138,7 +150,7 @@ export function registerIaCCommands(program: Command) {
           printChangelog(report);
         }
       } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
         process.exit(1);
       }
     });
@@ -186,7 +198,7 @@ export function registerIaCCommands(program: Command) {
           printRestoreResult(result);
         }
       } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
         process.exit(1);
       }
     });
@@ -196,45 +208,55 @@ export function registerIaCCommands(program: Command) {
     .description("Restore workspace from a snapshot file")
     .option("--dry-run", "Preview what would change without making modifications")
     .option("--delete", "Delete resources that aren't in the snapshot")
-    .action(async (file: string, opts: { dryRun?: boolean; delete?: boolean }) => {
-      const { plan, printPlan } = await import("../tools/plan.js");
-      const { restoreWorkspace, printRestoreResult } = await import("../tools/restore.js");
-      try {
-        const jsonOutput = Boolean(program.opts().json);
-        const restorePlan = await plan(file, {
-          allowDelete: opts.delete ?? false,
-          includeFolders: false,
-        });
+    .option(
+      "--concurrency <n>",
+      "Maximum concurrent GTM API requests (default: 5)",
+      parseConcurrencyOption,
+    )
+    .action(
+      async (file: string, opts: { dryRun?: boolean; delete?: boolean; concurrency?: number }) => {
+        const { plan, printPlan } = await import("../tools/plan.js");
+        const { restoreWorkspace, printRestoreResult } = await import("../tools/restore.js");
+        try {
+          const snapshotPath = resolveProjectPath(file, "Snapshot");
+          configureApiConcurrency(opts.concurrency);
+          const jsonOutput = Boolean(program.opts().json);
+          const restorePlan = await plan(snapshotPath, {
+            allowDelete: opts.delete ?? false,
+            includeFolders: false,
+          });
 
-        if (!jsonOutput) {
-          printPlan(restorePlan);
-        }
-
-        if (
-          !opts.dryRun &&
-          (restorePlan.riskLevel === "high" || restorePlan.riskLevel === "critical")
-        ) {
-          const confirmed = await confirmRiskyRestore(restorePlan.riskLevel, jsonOutput);
-          if (!confirmed) {
-            console.error(chalk.red("\n✖ Restore aborted.\n"));
-            process.exit(1);
+          if (!jsonOutput) {
+            printPlan(restorePlan);
           }
-        }
 
-        const result = await restoreWorkspace(file, {
-          dryRun: opts.dryRun ?? false,
-          allowDelete: opts.delete ?? false,
-        });
-        if (jsonOutput) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          printRestoreResult(result);
+          if (
+            !opts.dryRun &&
+            (restorePlan.riskLevel === "high" || restorePlan.riskLevel === "critical")
+          ) {
+            const confirmed = await confirmRiskyRestore(restorePlan.riskLevel, jsonOutput);
+            if (!confirmed) {
+              console.error(chalk.red("\n✖ Restore aborted.\n"));
+              process.exit(1);
+            }
+          }
+
+          const result = await restoreWorkspace(snapshotPath, {
+            dryRun: opts.dryRun ?? false,
+            allowDelete: opts.delete ?? false,
+            concurrency: opts.concurrency,
+          });
+          if (jsonOutput) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            printRestoreResult(result);
+          }
+        } catch (err) {
+          console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
+          process.exit(1);
         }
-      } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
-        process.exit(1);
-      }
-    });
+      },
+    );
 
   program
     .command("publish")
@@ -264,7 +286,7 @@ export function registerIaCCommands(program: Command) {
             printPublishResult(result);
           }
         } catch (err) {
-          console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+          console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
           process.exit(1);
         }
       },

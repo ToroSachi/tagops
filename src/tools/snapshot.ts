@@ -45,7 +45,11 @@ export interface SnapshotResult {
   environmentCount: number;
   transformationCount: number;
   timestamp: string;
+  sizeBytes: number;
+  warning?: string;
 }
+
+const LARGE_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 
 type SnapshotFeatureKey =
   | "supportTags"
@@ -120,7 +124,13 @@ export async function takeSnapshot(
 ): Promise<SnapshotResult> {
   const snapshot = await createSnapshot(meta);
   const filePath = resolve(outputPath ?? "gtm-snapshot.json");
-  writeFileSync(filePath, JSON.stringify(snapshot, null, 2) + "\n");
+  const serialized = JSON.stringify(snapshot, null, 2) + "\n";
+  const sizeBytes = Buffer.byteLength(serialized, "utf8");
+  const warning =
+    sizeBytes > LARGE_SNAPSHOT_BYTES
+      ? `Snapshot is ${Math.ceil(sizeBytes / (1024 * 1024))}MB, which exceeds the recommended 50MB size. Consider pruning or splitting large exports before committing them.`
+      : undefined;
+  writeFileSync(filePath, serialized);
 
   return {
     path: filePath,
@@ -133,6 +143,8 @@ export async function takeSnapshot(
     environmentCount: snapshot.environments?.length ?? 0,
     transformationCount: snapshot.transformations?.length ?? 0,
     timestamp: snapshot.meta.timestamp,
+    sizeBytes,
+    warning,
   };
 }
 
@@ -148,5 +160,8 @@ export function printSnapshotResult(result: SnapshotResult): void {
   console.log(`  ${chalk.green("✔")} Environments: ${result.environmentCount}`);
   console.log(`  ${chalk.green("✔")} Transformations: ${result.transformationCount}`);
   console.log(`  ${chalk.green("✔")} Timestamp:  ${result.timestamp}`);
+  if (result.warning) {
+    console.warn(`  ${chalk.yellow("!")} Warning:    ${result.warning}`);
+  }
   console.log();
 }

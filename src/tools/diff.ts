@@ -20,6 +20,7 @@ import {
   listTriggers,
   listVariables,
 } from "../lib/gtm-cli.js";
+import { stripTagOpsId, stripVolatileFields } from "../lib/identity.js";
 import { parseSnapshot } from "../types/schemas.js";
 import type { GtmSnapshot } from "./snapshot.js";
 import type {
@@ -85,6 +86,10 @@ export interface DiffReport {
   };
 }
 
+function coerceArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
 function loadSnapshot(snapshotPath?: string): { snapshot: GtmSnapshot; path: string } {
   const defaultPath = resolve("gtm-snapshot.json");
   const filePath = snapshotPath ? resolve(snapshotPath) : defaultPath;
@@ -98,21 +103,21 @@ function loadSnapshot(snapshotPath?: string): { snapshot: GtmSnapshot; path: str
   return { snapshot, path: filePath };
 }
 
-function omitKeys<T extends object>(item: T, keys: string[]): Record<string, unknown> {
-  const clone = { ...(item as Record<string, unknown>) };
-  for (const key of keys) {
-    delete clone[key];
+function normalizeComparableResource(
+  resource: Record<string, unknown>,
+  extraKeys: string[] = [],
+): Record<string, unknown> {
+  const normalized = stripVolatileFields(resource, extraKeys);
+
+  if (typeof normalized.notes === "string") {
+    normalized.notes = stripTagOpsId(normalized.notes) ?? null;
   }
-  return clone;
+
+  return normalized;
 }
 
-function stripTagOpsId(notes?: string): string | undefined {
-  if (!notes) return undefined;
-  const withoutId = notes
-    .replace(/(?:^|\n)\s*TagOps-ID:\s*[a-f0-9-]+\s*(?=\n|$)/gi, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return withoutId.length > 0 ? withoutId : undefined;
+function asComparableRecord<T extends object>(value: T): Record<string, unknown> {
+  return value as unknown as Record<string, unknown>;
 }
 
 function collectChangedFields(
@@ -137,7 +142,8 @@ function diffResources<T extends { name: string }>(
   resourceType: DiffResourceType,
   getIdentityKey: (item: T) => string,
   getDisplayId: (item: T) => string,
-  getComparable: (item: T) => Record<string, unknown> = (item) => omitKeys(item, ["fingerprint"]),
+  getComparable: (item: T) => Record<string, unknown> = (item) =>
+    normalizeComparableResource(item as Record<string, unknown>),
 ): ResourceDiff {
   const added: DiffEntry[] = [];
   const removed: DiffEntry[] = [];
@@ -211,12 +217,12 @@ export async function diffWorkspace(snapshotPath?: string): Promise<DiffReport> 
   const { snapshot, path } = loadSnapshot(snapshotPath);
 
   const [
-    currentTags,
-    currentTriggers,
-    currentVariables,
-    currentFolders,
-    currentBuiltIns,
-    currentEnvironments,
+    loadedTags,
+    loadedTriggers,
+    loadedVariables,
+    loadedFolders,
+    loadedBuiltIns,
+    loadedEnvironments,
   ] = await Promise.all([
     listTags(),
     listTriggers(),
@@ -225,6 +231,12 @@ export async function diffWorkspace(snapshotPath?: string): Promise<DiffReport> 
     listBuiltInVariables(),
     listEnvironments(),
   ]);
+  const currentTags = coerceArray<GtmTag>(loadedTags);
+  const currentTriggers = coerceArray<GtmTrigger>(loadedTriggers);
+  const currentVariables = coerceArray<GtmVariable>(loadedVariables);
+  const currentFolders = coerceArray<GtmFolder>(loadedFolders);
+  const currentBuiltIns = coerceArray<GtmBuiltInVariable>(loadedBuiltIns);
+  const currentEnvironments = coerceArray<GtmEnvironment>(loadedEnvironments);
 
   if (
     currentTags.length === 0 &&
@@ -239,28 +251,28 @@ export async function diffWorkspace(snapshotPath?: string): Promise<DiffReport> 
 
   const tagDiff = diffResources(
     currentTags,
-    snapshot.tags,
+    coerceArray<GtmTag>(snapshot.tags),
     "tag",
     (tag) => tag.tagId,
     (tag) => tag.tagId,
   );
   const trigDiff = diffResources(
     currentTriggers,
-    snapshot.triggers,
+    coerceArray<GtmTrigger>(snapshot.triggers),
     "trigger",
     (trigger) => trigger.triggerId,
     (trigger) => trigger.triggerId,
   );
   const varDiff = diffResources(
     currentVariables,
-    snapshot.variables,
+    coerceArray<GtmVariable>(snapshot.variables),
     "variable",
     (variable) => variable.variableId,
     (variable) => variable.variableId,
   );
   const folderDiff = diffResources(
     currentFolders,
-    snapshot.folders ?? [],
+    coerceArray<GtmFolder>(snapshot.folders),
     "folder",
     getFolderIdentity,
     (folder) => folder.folderId,
@@ -270,20 +282,20 @@ export async function diffWorkspace(snapshotPath?: string): Promise<DiffReport> 
   );
   const builtInDiff = diffResources(
     currentBuiltIns,
-    snapshot.builtInVariables ?? [],
+    coerceArray<GtmBuiltInVariable>(snapshot.builtInVariables),
     "builtInVariable",
     getBuiltInIdentity,
     getBuiltInIdentity,
-    (variable) =>
-      omitKeys(variable, ["accountId", "containerId", "workspaceId", "path", "name", "type"]),
+    (variable) => normalizeComparableResource(asComparableRecord(variable), ["name", "type"]),
   );
   const environmentDiff = diffResources(
     currentEnvironments,
-    snapshot.environments ?? [],
+    coerceArray<GtmEnvironment>(snapshot.environments),
     "environment",
     getEnvironmentIdentity,
     (environment) => environment.environmentId,
-    (environment) => omitKeys(environment, ["environmentId", "name", "path", "fingerprint"]),
+    (environment) =>
+      normalizeComparableResource(asComparableRecord(environment), ["environmentId", "name"]),
   );
 
   const allAdded = [

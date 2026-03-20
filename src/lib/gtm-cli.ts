@@ -10,7 +10,10 @@ import { tagmanager } from "@googleapis/tagmanager";
 import type { tagmanager_v2 } from "@googleapis/tagmanager";
 import crypto from "node:crypto";
 import { getAuthClient, getCurrentAuthenticatedEmail } from "./auth.js";
+import { configureApiConcurrency, getApiSemaphore } from "./concurrency.js";
 import { loadConfig, ConfigError } from "./config.js";
+import { getTagOpsId } from "./identity.js";
+import { getSafeErrorMessage } from "./redaction.js";
 import type {
   GtmAccountAccess,
   GtmBuiltInVariable,
@@ -32,35 +35,32 @@ import { TagOpsError, ErrorCode } from "./errors.js";
 
 // ── API Factory & Helpers ──
 
-class Semaphore {
-  private queue: Array<() => void> = [];
-  constructor(
-    private maxConcurrent: number,
-    private current = 0,
-  ) {}
-  async acquire(): Promise<void> {
-    if (this.current < this.maxConcurrent) {
-      this.current++;
-      return;
-    }
-    return new Promise((resolve) => this.queue.push(resolve));
-  }
-  release(): void {
-    if (this.queue.length > 0) {
-      const next = this.queue.shift();
-      next?.();
-    } else {
-      this.current--;
-    }
-  }
-}
-const apiSemaphore = new Semaphore(5);
+configureApiConcurrency();
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function coerceArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function getNextPageToken(
+  data: { nextPageToken?: string | null } | null | undefined,
+): string | undefined {
+  return typeof data?.nextPageToken === "string" && data.nextPageToken.length > 0
+    ? data.nextPageToken
+    : undefined;
+}
+
+function getFingerprint(
+  data: { fingerprint?: string | null } | null | undefined,
+): string | undefined {
+  return typeof data?.fingerprint === "string" && data.fingerprint.length > 0
+    ? data.fingerprint
+    : undefined;
+}
+
 async function withRetry<T>(operation: () => Promise<T>, maxRetries = 3): Promise<T> {
-  await apiSemaphore.acquire();
-  try {
+  return getApiSemaphore().use(async () => {
     let attempt = 0;
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -81,9 +81,7 @@ async function withRetry<T>(operation: () => Promise<T>, maxRetries = 3): Promis
         throw err;
       }
     }
-  } finally {
-    apiSemaphore.release();
-  }
+  });
 }
 
 export async function getGtmClient() {
@@ -95,13 +93,13 @@ export async function getGtmClient() {
   });
 }
 
-export function getWorkspacePath(): string {
-  const config = loadConfig();
+export function getWorkspacePath(profileName?: string): string {
+  const config = loadConfig(profileName);
   return `accounts/${config.accountId}/containers/${config.containerId}/workspaces/${config.workspaceId}`;
 }
 
-export function getContainerPath(): string {
-  const config = loadConfig();
+export function getContainerPath(profileName?: string): string {
+  const config = loadConfig(profileName);
   return `accounts/${config.accountId}/containers/${config.containerId}`;
 }
 
@@ -152,7 +150,10 @@ async function handleApiError(err: unknown, operation: string): Promise<never> {
     });
   }
 
-  const details = error.response?.data?.error?.message || error.message || "Unknown error";
+  const details = getSafeErrorMessage(
+    error.response?.data?.error?.message ?? error.message,
+    "Unknown error",
+  );
   throw new TagOpsError({
     code: ErrorCode.INTERNAL_ERROR,
     message: `GTM API failed during ${operation}: ${details}`,
@@ -277,11 +278,11 @@ export async function listUserPermissions(profileName?: string): Promise<GtmUser
       );
 
       permissions.push(
-        ...(res.data.userPermission ?? [])
+        ...coerceArray<tagmanager_v2.Schema$UserPermission>(res.data?.userPermission)
           .map((permission) => mapUserPermission(permission))
           .filter((permission): permission is GtmUserPermission => permission !== null),
       );
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, permissions);
@@ -367,14 +368,14 @@ export async function listWorkspaces(): Promise<Array<{ workspaceId: string; nam
       const res = await withRetry(() =>
         gtm.accounts.containers.workspaces.list({ parent, pageToken }),
       );
-      const page = res.data.workspace || [];
+      const page = coerceArray<{ workspaceId?: string; name?: string }>(res.data?.workspace);
       workspaces.push(
-        ...page.map((w: any) => ({
+        ...page.map((w) => ({
           workspaceId: w.workspaceId as string,
           name: w.name as string,
         })),
       );
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     return workspaces;
@@ -399,8 +400,8 @@ export async function getWorkspaceStatus(): Promise<WorkspaceStatus> {
     const path = getWorkspacePath();
     const gtm = await getGtmClient();
     const res = await withRetry(() => gtm.accounts.containers.workspaces.getStatus({ path }));
-    const mergeConflict = res.data.mergeConflict ?? [];
-    const workspaceChange = res.data.workspaceChange ?? [];
+    const mergeConflict = coerceArray<tagmanager_v2.Schema$MergeConflict>(res.data?.mergeConflict);
+    const workspaceChange = coerceArray<tagmanager_v2.Schema$Entity>(res.data?.workspaceChange);
 
     return {
       synced: mergeConflict.length === 0 && workspaceChange.length === 0,
@@ -535,7 +536,7 @@ export async function getContainer(): Promise<GtmContainerMetadata> {
 
     const gtm = await getGtmClient();
     const res = await withRetry(() => gtm.accounts.containers.get({ path }));
-    const container = res.data as GtmContainerMetadata;
+    const container = (res.data ?? {}) as GtmContainerMetadata;
 
     setCache(cacheKey, container);
     return container;
@@ -544,9 +545,9 @@ export async function getContainer(): Promise<GtmContainerMetadata> {
   }
 }
 
-export async function listTags(): Promise<GtmTag[]> {
+export async function listTags(profileName?: string): Promise<GtmTag[]> {
   try {
-    const parent = getWorkspacePath();
+    const parent = getWorkspacePath(profileName);
     const cacheKey = `tags:${parent}`;
     const cached = getCached<GtmTag[]>(cacheKey);
     if (cached) return cached;
@@ -562,9 +563,9 @@ export async function listTags(): Promise<GtmTag[]> {
           pageToken,
         }),
       );
-      const tags = (res.data.tag as GtmTag[]) || [];
+      const tags = coerceArray<GtmTag>(res.data?.tag);
       allTags.push(...tags);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allTags);
@@ -582,7 +583,7 @@ export async function getTag(tagId: string): Promise<GtmTag | null> {
     const res = await withRetry(() =>
       gtm.accounts.containers.workspaces.tags.get({ path: `${parent}/tags/${tagId}` }),
     );
-    return res.data as GtmTag;
+    return (res.data ?? null) as GtmTag | null;
   } catch (err: unknown) {
     const error = err as { response?: { status?: number } };
     if (error.response?.status === 404) return null;
@@ -590,9 +591,9 @@ export async function getTag(tagId: string): Promise<GtmTag | null> {
   }
 }
 
-export async function listTriggers(): Promise<GtmTrigger[]> {
+export async function listTriggers(profileName?: string): Promise<GtmTrigger[]> {
   try {
-    const parent = getWorkspacePath();
+    const parent = getWorkspacePath(profileName);
     const cacheKey = `triggers:${parent}`;
     const cached = getCached<GtmTrigger[]>(cacheKey);
     if (cached) return cached;
@@ -608,9 +609,9 @@ export async function listTriggers(): Promise<GtmTrigger[]> {
           pageToken,
         }),
       );
-      const triggers = (res.data.trigger as GtmTrigger[]) || [];
+      const triggers = coerceArray<GtmTrigger>(res.data?.trigger);
       allTriggers.push(...triggers);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allTriggers);
@@ -628,7 +629,7 @@ export async function getTrigger(triggerId: string): Promise<GtmTrigger | null> 
     const res = await withRetry(() =>
       gtm.accounts.containers.workspaces.triggers.get({ path: `${parent}/triggers/${triggerId}` }),
     );
-    return res.data as GtmTrigger;
+    return (res.data ?? null) as GtmTrigger | null;
   } catch (err: unknown) {
     const error = err as { response?: { status?: number } };
     if (error.response?.status === 404) return null;
@@ -636,9 +637,9 @@ export async function getTrigger(triggerId: string): Promise<GtmTrigger | null> 
   }
 }
 
-export async function listVariables(): Promise<GtmVariable[]> {
+export async function listVariables(profileName?: string): Promise<GtmVariable[]> {
   try {
-    const parent = getWorkspacePath();
+    const parent = getWorkspacePath(profileName);
     const cacheKey = `variables:${parent}`;
     const cached = getCached<GtmVariable[]>(cacheKey);
     if (cached) return cached;
@@ -654,9 +655,9 @@ export async function listVariables(): Promise<GtmVariable[]> {
           pageToken,
         }),
       );
-      const variables = (res.data.variable as GtmVariable[]) || [];
+      const variables = coerceArray<GtmVariable>(res.data?.variable);
       allVariables.push(...variables);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allVariables);
@@ -684,9 +685,9 @@ export async function listClients(): Promise<GtmClient[]> {
           pageToken,
         }),
       );
-      const clients = (res.data.client as GtmClient[]) || [];
+      const clients = coerceArray<GtmClient>(res.data?.client);
       allClients.push(...clients);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allClients);
@@ -715,9 +716,9 @@ export async function listTransformations(): Promise<GtmTransformation[]> {
           pageToken,
         }),
       );
-      const transformations = (res.data.transformation as GtmTransformation[]) || [];
+      const transformations = coerceArray<GtmTransformation>(res.data?.transformation);
       allTransformations.push(...transformations);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allTransformations);
@@ -728,9 +729,9 @@ export async function listTransformations(): Promise<GtmTransformation[]> {
   }
 }
 
-export async function listFolders(): Promise<GtmFolder[]> {
+export async function listFolders(profileName?: string): Promise<GtmFolder[]> {
   try {
-    const parent = getWorkspacePath();
+    const parent = getWorkspacePath(profileName);
     const cacheKey = `folders:${parent}`;
     const cached = getCached<GtmFolder[]>(cacheKey);
     if (cached) return cached;
@@ -746,9 +747,9 @@ export async function listFolders(): Promise<GtmFolder[]> {
           pageToken,
         }),
       );
-      const folders = (res.data.folder as GtmFolder[]) || [];
+      const folders = coerceArray<GtmFolder>(res.data?.folder);
       allFolders.push(...folders);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allFolders);
@@ -758,9 +759,9 @@ export async function listFolders(): Promise<GtmFolder[]> {
   }
 }
 
-export async function listBuiltInVariables(): Promise<GtmBuiltInVariable[]> {
+export async function listBuiltInVariables(profileName?: string): Promise<GtmBuiltInVariable[]> {
   try {
-    const parent = getWorkspacePath();
+    const parent = getWorkspacePath(profileName);
     const cacheKey = `builtInVariables:${parent}`;
     const cached = getCached<GtmBuiltInVariable[]>(cacheKey);
     if (cached) return cached;
@@ -776,9 +777,9 @@ export async function listBuiltInVariables(): Promise<GtmBuiltInVariable[]> {
           pageToken,
         }),
       );
-      const builtInVariables = (res.data.builtInVariable as GtmBuiltInVariable[]) || [];
+      const builtInVariables = coerceArray<GtmBuiltInVariable>(res.data?.builtInVariable);
       allBuiltInVariables.push(...builtInVariables);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allBuiltInVariables);
@@ -788,9 +789,9 @@ export async function listBuiltInVariables(): Promise<GtmBuiltInVariable[]> {
   }
 }
 
-export async function listEnvironments(): Promise<GtmEnvironment[]> {
+export async function listEnvironments(profileName?: string): Promise<GtmEnvironment[]> {
   try {
-    const parent = getContainerPath();
+    const parent = getContainerPath(profileName);
     const cacheKey = `environments:${parent}`;
     const cached = getCached<GtmEnvironment[]>(cacheKey);
     if (cached) return cached;
@@ -806,9 +807,9 @@ export async function listEnvironments(): Promise<GtmEnvironment[]> {
           pageToken,
         }),
       );
-      const environments = (res.data.environment as GtmEnvironment[]) || [];
+      const environments = coerceArray<GtmEnvironment>(res.data?.environment);
       allEnvironments.push(...environments);
-      pageToken = res.data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(res.data);
     } while (pageToken);
 
     setCache(cacheKey, allEnvironments);
@@ -834,7 +835,7 @@ export async function createFolder(
     const parent = getWorkspacePath();
     const gtm = await getGtmClient();
     const existingNotes = config.notes ? String(config.notes) : "";
-    const hasUUID = existingNotes.includes("TagOps-ID:");
+    const hasUUID = Boolean(getTagOpsId(existingNotes));
     const uuid = hasUUID ? "" : crypto.randomUUID();
     const notesValue = hasUUID
       ? existingNotes
@@ -853,7 +854,7 @@ export async function createFolder(
     );
 
     apiCache.clear();
-    return res.data as GtmFolder;
+    return (res.data ?? null) as GtmFolder | null;
   } catch (err: unknown) {
     const error = err as {
       response?: { status?: number; data?: { error?: { message?: string } } };
@@ -868,7 +869,9 @@ export async function createFolder(
       const listRes = await withRetry(() =>
         gtm.accounts.containers.workspaces.folders.list({ parent: reqPath }),
       );
-      const existing = listRes.data.folder?.find((folder: any) => folder.name === name);
+      const existing = coerceArray<GtmFolder>(listRes.data?.folder).find(
+        (folder) => folder.name === name,
+      );
       if (existing) {
         return existing as GtmFolder;
       }
@@ -893,7 +896,7 @@ export async function updateFolder(
     const path = `${parent}/folders/${folderId}`;
 
     const current = await withRetry(() => gtm.accounts.containers.workspaces.folders.get({ path }));
-    const fingerprint = current.data.fingerprint ?? undefined;
+    const fingerprint = getFingerprint(current.data);
 
     const res = await withRetry(() =>
       gtm.accounts.containers.workspaces.folders.update({
@@ -904,7 +907,7 @@ export async function updateFolder(
     );
 
     apiCache.clear();
-    return res.data as GtmFolder;
+    return (res.data ?? null) as GtmFolder | null;
   } catch (err) {
     return handleApiError(err, "updateFolder");
   }
@@ -928,7 +931,7 @@ export async function createTag(input: CreateTagInput): Promise<string> {
     const gtm = await getGtmClient();
     const existingNotes = input.config.notes ? String(input.config.notes) : "";
     // Only inject UUID if one isn't already present (prevents duplicates on re-sync)
-    const hasUUID = existingNotes.includes("TagOps-ID:");
+    const hasUUID = Boolean(getTagOpsId(existingNotes));
     const uuid = hasUUID ? "" : crypto.randomUUID();
     const notesValue = hasUUID
       ? existingNotes
@@ -1070,7 +1073,9 @@ export async function deleteTag(tagId: string): Promise<boolean> {
   try {
     const parent = getWorkspacePath();
     const gtm = await getGtmClient();
-    await gtm.accounts.containers.workspaces.tags.delete({ path: `${parent}/tags/${tagId}` });
+    await withRetry(() =>
+      gtm.accounts.containers.workspaces.tags.delete({ path: `${parent}/tags/${tagId}` }),
+    );
     apiCache.clear();
     return true;
   } catch (err: unknown) {
@@ -1085,9 +1090,11 @@ export async function deleteTrigger(triggerId: string): Promise<boolean> {
   try {
     const parent = getWorkspacePath();
     const gtm = await getGtmClient();
-    await gtm.accounts.containers.workspaces.triggers.delete({
-      path: `${parent}/triggers/${triggerId}`,
-    });
+    await withRetry(() =>
+      gtm.accounts.containers.workspaces.triggers.delete({
+        path: `${parent}/triggers/${triggerId}`,
+      }),
+    );
     apiCache.clear();
     return true;
   } catch (err: unknown) {
@@ -1102,9 +1109,11 @@ export async function deleteVariable(variableId: string): Promise<boolean> {
   try {
     const parent = getWorkspacePath();
     const gtm = await getGtmClient();
-    await gtm.accounts.containers.workspaces.variables.delete({
-      path: `${parent}/variables/${variableId}`,
-    });
+    await withRetry(() =>
+      gtm.accounts.containers.workspaces.variables.delete({
+        path: `${parent}/variables/${variableId}`,
+      }),
+    );
     apiCache.clear();
     return true;
   } catch (err: unknown) {
@@ -1131,7 +1140,7 @@ export async function createVariable(
     const parent = getWorkspacePath();
     const gtm = await getGtmClient();
     const existingNotes = config.notes ? String(config.notes) : "";
-    const hasUUID = existingNotes.includes("TagOps-ID:");
+    const hasUUID = Boolean(getTagOpsId(existingNotes));
     const uuid = hasUUID ? "" : crypto.randomUUID();
     const notesValue = hasUUID
       ? existingNotes
@@ -1151,7 +1160,7 @@ export async function createVariable(
     );
 
     apiCache.clear();
-    return res.data as GtmVariable;
+    return (res.data ?? null) as GtmVariable | null;
   } catch (err) {
     return handleApiError(err, "createVariable");
   }
@@ -1176,7 +1185,7 @@ export async function updateVariable(
     const current = await withRetry(() =>
       gtm.accounts.containers.workspaces.variables.get({ path }),
     );
-    const fingerprint = current.data.fingerprint ?? undefined;
+    const fingerprint = getFingerprint(current.data);
 
     const res = await withRetry(() =>
       gtm.accounts.containers.workspaces.variables.update({
@@ -1187,7 +1196,7 @@ export async function updateVariable(
     );
 
     apiCache.clear();
-    return res.data as GtmVariable;
+    return (res.data ?? null) as GtmVariable | null;
   } catch (err) {
     return handleApiError(err, "updateVariable");
   }
@@ -1210,7 +1219,7 @@ export async function createTrigger(
     const parent = getWorkspacePath();
     const gtm = await getGtmClient();
     const existingNotes = config.notes ? String(config.notes) : "";
-    const hasUUID = existingNotes.includes("TagOps-ID:");
+    const hasUUID = Boolean(getTagOpsId(existingNotes));
     const uuid = hasUUID ? "" : crypto.randomUUID();
     const notesValue = hasUUID
       ? existingNotes
@@ -1230,7 +1239,7 @@ export async function createTrigger(
     );
 
     apiCache.clear();
-    return res.data as GtmTrigger;
+    return (res.data ?? null) as GtmTrigger | null;
   } catch (err: unknown) {
     const error = err as {
       response?: { status?: number; data?: { error?: { message?: string } } };
@@ -1246,7 +1255,7 @@ export async function createTrigger(
       const listRes = await withRetry(() =>
         gtm.accounts.containers.workspaces.triggers.list({ parent: reqPath }),
       );
-      const existing = listRes.data.trigger?.find((t: any) => t.name === name);
+      const existing = coerceArray<GtmTrigger>(listRes.data?.trigger).find((t) => t.name === name);
       if (existing) {
         return existing as GtmTrigger;
       }
@@ -1271,7 +1280,7 @@ export async function updateTrigger(
     const current = await withRetry(() =>
       gtm.accounts.containers.workspaces.triggers.get({ path }),
     );
-    const fingerprint = current.data.fingerprint ?? undefined;
+    const fingerprint = getFingerprint(current.data);
 
     const res = await withRetry(() =>
       gtm.accounts.containers.workspaces.triggers.update({
@@ -1282,7 +1291,7 @@ export async function updateTrigger(
     );
 
     apiCache.clear();
-    return res.data as GtmTrigger;
+    return (res.data ?? null) as GtmTrigger | null;
   } catch (err) {
     return handleApiError(err, "updateTrigger");
   }
@@ -1317,7 +1326,7 @@ function getVersionCount(
   items: unknown[] | undefined,
 ): string | undefined {
   if (count != null) return count;
-  if (items !== undefined) return String(items.length);
+  if (Array.isArray(items)) return String(items.length);
   return undefined;
 }
 
@@ -1367,15 +1376,15 @@ export async function listVersions(): Promise<GtmVersionHeader[]> {
       const res = await withRetry(() =>
         gtm.accounts.containers.version_headers.list({ parent, pageToken }),
       );
-      const data = res.data as {
+      const data = (res.data ?? {}) as {
         containerVersionHeader?: GtmVersionResource[];
         nextPageToken?: string | null;
       };
-      for (const header of data.containerVersionHeader ?? []) {
+      for (const header of coerceArray<GtmVersionResource>(data.containerVersionHeader)) {
         const normalized = normalizeVersionHeader(header);
         if (normalized) versions.push(normalized);
       }
-      pageToken = data.nextPageToken ?? undefined;
+      pageToken = getNextPageToken(data);
     } while (pageToken);
 
     versions.sort(compareVersionsDescending);
@@ -1411,12 +1420,12 @@ export async function createVersion(
     );
 
     const containerVersion = normalizeVersionHeader(
-      res.data.containerVersion as GtmVersionResource,
+      (res.data?.containerVersion ?? {}) as GtmVersionResource,
     );
     return {
       ...(containerVersion ?? {}),
-      compilerError: res.data.compilerError ?? undefined,
-      syncStatus: (res.data.syncStatus as GtmSyncStatus | undefined) ?? undefined,
+      compilerError: res.data?.compilerError ?? undefined,
+      syncStatus: (res.data?.syncStatus as GtmSyncStatus | undefined) ?? undefined,
     };
   } catch (err) {
     return handleApiError(err, "createVersion");
@@ -1445,7 +1454,7 @@ export async function getVersionDetails(versionId: string): Promise<GtmVersionHe
     const path = getVersionPath(versionId);
     const gtm = await getGtmClient();
     const res = await withRetry(() => gtm.accounts.containers.versions.get({ path }));
-    return normalizeVersionHeader(res.data as GtmVersionResource, {
+    return normalizeVersionHeader((res.data ?? {}) as GtmVersionResource, {
       containerVersionId: versionId,
       path,
     });
@@ -1466,7 +1475,7 @@ export async function rollbackToVersion(versionId: string): Promise<GtmVersionHe
     apiCache.clear();
 
     const publishedVersion = normalizeVersionHeader(
-      res.data.containerVersion as GtmVersionResource,
+      (res.data?.containerVersion ?? {}) as GtmVersionResource,
       {
         containerVersionId: versionId,
         path,
@@ -1484,7 +1493,7 @@ export async function getLatestPublishedVersion(): Promise<GtmVersionHeader | nu
     const parent = getContainerPath();
     const gtm = await getGtmClient();
     const res = await withRetry(() => gtm.accounts.containers.versions.live({ parent }));
-    return normalizeVersionHeader(res.data as GtmVersionResource);
+    return normalizeVersionHeader((res.data ?? {}) as GtmVersionResource);
   } catch (err: unknown) {
     const error = err as { response?: { status?: number } };
     if (error.response?.status === 404) return null;

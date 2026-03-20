@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import chalk, { type ChalkInstance } from "chalk";
 import { BUILTIN_TRIGGER_IDS } from "../lib/architecture.js";
 import { listFolders, listTags, listTriggers, listVariables } from "../lib/gtm-cli.js";
+import { getTagOpsId, matchResources, stripTagOpsId } from "../lib/identity.js";
 import { parseSnapshot } from "../types/schemas.js";
 import type { GtmFolder, GtmTag, GtmTrigger, GtmVariable } from "../types/gtm.js";
 import type { GtmSnapshot } from "./snapshot.js";
@@ -87,6 +88,10 @@ interface PlannedTriggerResult extends PlannedResourceResult {
   idMap: Map<string, string>;
 }
 
+function coerceArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
 const ZERO_COUNTS: ResourcePlanCounts = {
   current: 0,
   snapshot: 0,
@@ -95,21 +100,6 @@ const ZERO_COUNTS: ResourcePlanCounts = {
   delete: 0,
   unchanged: 0,
 };
-
-function getTagOpsId(notes?: string): string | undefined {
-  if (!notes) return undefined;
-  const match = notes.match(/TagOps-ID:\s*([a-f0-9-]+)/i);
-  return match?.[1];
-}
-
-function stripTagOpsId(notes?: string): string | undefined {
-  if (!notes) return undefined;
-  const withoutId = notes
-    .replace(/(?:^|\n)\s*TagOps-ID:\s*[a-f0-9-]+\s*(?=\n|$)/gi, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return withoutId.length > 0 ? withoutId : undefined;
-}
 
 function normalizeStringArray(values?: string[]): string[] | undefined {
   if (!values || values.length === 0) return undefined;
@@ -122,29 +112,6 @@ function mapTriggerIds(
 ): string[] | undefined {
   if (!ids || ids.length === 0) return undefined;
   return ids.map((id) => triggerIdMap.get(id) ?? id);
-}
-
-function findMatchingResource<T extends { name: string; notes?: string }>(
-  snapshotItem: T,
-  currentItems: T[],
-  idKey: keyof T,
-): T | undefined {
-  const snapshotTagOpsId = getTagOpsId(snapshotItem.notes);
-  if (snapshotTagOpsId) {
-    const byTagOpsId = currentItems.find((item) => getTagOpsId(item.notes) === snapshotTagOpsId);
-    if (byTagOpsId) return byTagOpsId;
-  }
-
-  const snapshotId = snapshotItem[idKey];
-  if (typeof snapshotId === "string" && snapshotId.length > 0) {
-    const byId = currentItems.find((item) => item[idKey] === snapshotId);
-    if (byId) return byId;
-  }
-
-  const byName = currentItems.filter((item) => item.name === snapshotItem.name);
-  if (byName.length === 1) return byName[0];
-
-  return undefined;
 }
 
 function normalizeTag(tag: RestorableTag): Record<string, unknown> {
@@ -270,8 +237,12 @@ function planVariables(
   let unchanged = 0;
   let remove = 0;
 
-  for (const snapshotVariable of snapshotVariables) {
-    const currentVariable = findMatchingResource(snapshotVariable, currentVariables, "variableId");
+  for (const { source: snapshotVariable, target: currentVariable } of matchResources(
+    snapshotVariables,
+    currentVariables,
+    "variableId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentVariable) {
       actions.push({
         action: "create",
@@ -342,8 +313,12 @@ function planTriggers(
   let unchanged = 0;
   let remove = 0;
 
-  for (const snapshotTrigger of snapshotTriggers) {
-    const currentTrigger = findMatchingResource(snapshotTrigger, currentTriggers, "triggerId");
+  for (const { source: snapshotTrigger, target: currentTrigger } of matchResources(
+    snapshotTriggers,
+    currentTriggers,
+    "triggerId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentTrigger) {
       actions.push({
         action: "create",
@@ -429,8 +404,12 @@ function planTags(
   let unchanged = 0;
   let remove = 0;
 
-  for (const snapshotTag of snapshotTags) {
-    const currentTag = findMatchingResource(snapshotTag, currentTags, "tagId");
+  for (const { source: snapshotTag, target: currentTag } of matchResources(
+    snapshotTags,
+    currentTags,
+    "tagId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentTag) {
       actions.push({
         action: "create",
@@ -500,8 +479,12 @@ function planFolders(
   let unchanged = 0;
   let remove = 0;
 
-  for (const snapshotFolder of snapshotFolders) {
-    const currentFolder = findMatchingResource(snapshotFolder, currentFolders, "folderId");
+  for (const { source: snapshotFolder, target: currentFolder } of matchResources(
+    snapshotFolders,
+    currentFolders,
+    "folderId",
+    (item) => getTagOpsId(item.notes),
+  )) {
     if (!currentFolder) {
       actions.push({
         action: "create",
@@ -659,28 +642,36 @@ export async function plan(snapshotPath: string, options: PlanOptions = {}): Pro
   const allowDelete = options.allowDelete ?? true;
   const includeFolders = options.includeFolders ?? true;
 
-  const [currentTags, currentTriggers, currentVariables, currentFolders] = await Promise.all([
+  const [loadedTags, loadedTriggers, loadedVariables, loadedFolders] = await Promise.all([
     listTags(),
     listTriggers(),
     listVariables(),
     listFolders(),
   ]);
+  const currentTags = coerceArray<GtmTag>(loadedTags);
+  const currentTriggers = coerceArray<GtmTrigger>(loadedTriggers);
+  const currentVariables = coerceArray<GtmVariable>(loadedVariables);
+  const currentFolders = coerceArray<GtmFolder>(loadedFolders);
 
-  if (
-    currentTags.length === 0 &&
-    currentTriggers.length === 0 &&
-    currentVariables.length === 0 &&
-    currentFolders.length === 0
-  ) {
-    throw new Error("Cannot connect to GTM. Run: tagops auth login");
-  }
-
-  const variablePlan = planVariables(snapshot.variables, currentVariables, allowDelete);
-  const triggerPlan = planTriggers(snapshot.triggers, currentTriggers, allowDelete);
-  const tagPlan = planTags(snapshot.tags, currentTags, triggerPlan.idMap, allowDelete);
+  const variablePlan = planVariables(
+    coerceArray<GtmVariable>(snapshot.variables),
+    currentVariables,
+    allowDelete,
+  );
+  const triggerPlan = planTriggers(
+    coerceArray<GtmTrigger>(snapshot.triggers),
+    currentTriggers,
+    allowDelete,
+  );
+  const tagPlan = planTags(
+    coerceArray<GtmTag>(snapshot.tags),
+    currentTags,
+    triggerPlan.idMap,
+    allowDelete,
+  );
   const folderPlan = includeFolders
     ? snapshot.folders
-      ? planFolders(snapshot.folders, currentFolders, allowDelete)
+      ? planFolders(coerceArray<GtmFolder>(snapshot.folders), currentFolders, allowDelete)
       : { actions: [], counts: zeroCounts() }
     : { actions: [], counts: zeroCounts() };
 

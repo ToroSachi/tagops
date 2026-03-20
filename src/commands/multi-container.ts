@@ -1,5 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
+import { parseConcurrencyOption } from "../lib/concurrency.js";
+import { getSafeErrorMessage } from "../lib/redaction.js";
 import {
   getProfileEnvironment,
   validatePromotionFlow,
@@ -22,7 +24,7 @@ export function registerMultiContainerCommands(program: Command) {
           printCompareReport(report);
         }
       } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+        console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
         process.exit(1);
       }
     });
@@ -34,27 +36,41 @@ export function registerMultiContainerCommands(program: Command) {
     .requiredOption("--target <profile>", "Target profile name")
     .option("--dry-run", "Preview changes without syncing")
     .option("--force", "Skip confirmation prompt")
-    .action(async (opts: { source: string; target: string; dryRun?: boolean; force?: boolean }) => {
-      const { syncContainers } = await import("../tools/sync.js");
-      try {
-        const result = await withDefaultProfileName(opts.target, () =>
-          syncContainers({
-            source: opts.source,
-            target: opts.target,
-            dryRun: !!opts.dryRun,
-            force: !!opts.force || !!program.opts().json,
-            silent: !!program.opts().json,
-          }),
-        );
-        if (program.opts().json) {
-          console.log(JSON.stringify(result, null, 2));
+    .option(
+      "--concurrency <n>",
+      "Maximum concurrent GTM API requests (default: 5)",
+      parseConcurrencyOption,
+    )
+    .action(
+      async (opts: {
+        source: string;
+        target: string;
+        dryRun?: boolean;
+        force?: boolean;
+        concurrency?: number;
+      }) => {
+        const { syncContainers } = await import("../tools/sync.js");
+        try {
+          const result = await withDefaultProfileName(opts.target, () =>
+            syncContainers({
+              source: opts.source,
+              target: opts.target,
+              dryRun: !!opts.dryRun,
+              force: !!opts.force || !!program.opts().json,
+              silent: !!program.opts().json,
+              concurrency: opts.concurrency,
+            }),
+          );
+          if (program.opts().json) {
+            console.log(JSON.stringify(result, null, 2));
+          }
+          if (result.errors.length > 0) process.exit(1);
+        } catch (err) {
+          console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
+          process.exit(1);
         }
-        if (result.errors.length > 0) process.exit(1);
-      } catch (err) {
-        console.error(chalk.red(`\n✖ ${(err as Error).message}`));
-        process.exit(1);
-      }
-    });
+      },
+    );
 
   program
     .command("promote")
@@ -64,6 +80,11 @@ export function registerMultiContainerCommands(program: Command) {
     .option("--publish", "Create a version and publish it in the target after sync")
     .option("--dry-run", "Preview the promotion plan without applying changes")
     .option("--force", "Skip confirmation prompt during sync")
+    .option(
+      "--concurrency <n>",
+      "Maximum concurrent GTM API requests (default: 5)",
+      parseConcurrencyOption,
+    )
     .action(
       async (opts: {
         source: string;
@@ -71,6 +92,7 @@ export function registerMultiContainerCommands(program: Command) {
         publish?: boolean;
         dryRun?: boolean;
         force?: boolean;
+        concurrency?: number;
       }) => {
         const { promote } = await import("../tools/promote.js");
 
@@ -92,6 +114,7 @@ export function registerMultiContainerCommands(program: Command) {
             publish: !!opts.publish,
             force: !!opts.force || !!program.opts().json,
             silent: !!program.opts().json,
+            concurrency: opts.concurrency,
           });
 
           if (program.opts().json) {
@@ -102,7 +125,7 @@ export function registerMultiContainerCommands(program: Command) {
             process.exit(1);
           }
         } catch (err) {
-          console.error(chalk.red(`\n✖ ${(err as Error).message}`));
+          console.error(chalk.red(`\n✖ ${getSafeErrorMessage(err)}`));
           process.exit(1);
         }
       },

@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { configureApiConcurrency } from "../lib/concurrency.js";
 import {
   type PromotionEnvironment,
   type PromotionValidationResult,
@@ -56,6 +57,7 @@ export interface PromoteOptions {
   versionName?: string;
   versionDescription?: string;
   silent?: boolean;
+  concurrency?: number;
 }
 
 export interface PromotionResult {
@@ -334,6 +336,8 @@ export async function promote(
   targetProfile: string,
   opts: PromoteOptions = {},
 ): Promise<PromotionResult> {
+  configureApiConcurrency(opts.concurrency);
+
   const log = (...args: unknown[]) => {
     if (!opts.silent) {
       console.log(...args);
@@ -385,6 +389,7 @@ export async function promote(
       dryRun: false,
       force: opts.force,
       silent: opts.silent,
+      concurrency: opts.concurrency,
     }),
   );
 
