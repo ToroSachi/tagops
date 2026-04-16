@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TagOps — Infrastructure-as-code for Google Tag Manager</title>
+<meta name="description" content="Open-source CLI that installs vendor pixels with one command, catches the Consent Mode v2 misconfigs that cost accounts 90% of EEA conversions, and treats your GTM container like production.">
+<meta property="og:title" content="TagOps — IaC for Google Tag Manager">
+<meta property="og:description" content="Catches the Consent Mode v2 misconfigs that cost accounts 90% of EEA conversions. Open source, MIT.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://torosachi.github.io/tagops/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ctext y='20' font-size='22'%3E%F0%9F%8F%B7%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --surface: #121212;
+    --surface-hi: #1a1a1a;
+    --border: #262626;
+    --text: #ededed;
+    --text-dim: #a0a0a0;
+    --text-dimmer: #6b6b6b;
+    --accent: #22c55e;
+    --accent-dim: #166534;
+    --warn: #facc15;
+    --danger: #ef4444;
+    --link: #60a5fa;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--mono); font-size: 0.9em; background: var(--surface-hi); padding: 0.15em 0.35em; border-radius: 3px; }
+  .container { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+  .nav {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(10,10,10,0.85); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+  }
+  .nav-inner {
+    max-width: 880px; margin: 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .brand { font-family: var(--mono); font-weight: 600; font-size: 18px; color: var(--text); }
+  .brand-tag { color: var(--accent); }
+  .nav-links { display: flex; gap: 24px; font-size: 14px; }
+  .nav-links a { color: var(--text-dim); }
+  .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+  section { padding: 72px 0; border-bottom: 1px solid var(--border); }
+  h1, h2, h3 { font-weight: 600; line-height: 1.2; }
+  h1 { font-size: 56px; letter-spacing: -0.02em; margin-bottom: 24px; }
+  h2 { font-size: 32px; letter-spacing: -0.01em; margin-bottom: 20px; }
+  h3 { font-size: 20px; margin-bottom: 12px; }
+  p { color: var(--text-dim); margin-bottom: 18px; }
+  p.lead { font-size: 19px; color: var(--text); max-width: 660px; }
+  .hero { padding: 80px 0 64px; }
+  .hero h1 { max-width: 720px; }
+  .hero .lead { font-size: 20px; }
+  .hero-accent { color: var(--accent); }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px;
+    color: var(--text-dimmer); text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .terminal {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 24px 0;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.35);
+  }
+  .terminal-head {
+    background: #111;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .terminal-head .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .terminal-head .d1 { background: #ff5f56; }
+  .terminal-head .d2 { background: #ffbd2e; }
+  .terminal-head .d3 { background: #27c93f; }
+  .terminal-head .title { margin-left: 12px; color: var(--text-dimmer); font-size: 11px; }
+  .terminal-body { padding: 18px 20px; overflow-x: auto; white-space: pre; color: var(--text); }
+  .terminal-body .cmd { color: var(--text); }
+  .terminal-body .prompt { color: var(--accent); }
+  .terminal-body .flag { color: var(--link); }
+  .terminal-body .ok { color: var(--accent); }
+  .terminal-body .warn { color: var(--warn); }
+  .terminal-body .err { color: var(--danger); }
+  .terminal-body .dim { color: var(--text-dimmer); }
+  .terminal-body .loss { color: #fb7185; font-weight: 600; }
+
+  .cta {
+    display: inline-block; padding: 12px 22px; border-radius: 6px;
+    font-family: var(--mono); font-size: 14px; font-weight: 500;
+    text-decoration: none; transition: background 0.15s, transform 0.05s;
+    border: 1px solid transparent;
+  }
+  .cta:hover { text-decoration: none; transform: translateY(-1px); }
+  .cta:active { transform: translateY(0); }
+  .cta-primary { background: var(--accent); color: #000; }
+  .cta-primary:hover { background: #16a34a; }
+  .cta-secondary { background: transparent; color: var(--text); border-color: var(--border); }
+  .cta-secondary:hover { border-color: var(--text-dim); }
+  .ctas { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 28px; }
+
+  .three-up { display: grid; grid-template-columns: 1fr; gap: 24px; margin-top: 40px; }
+  @media (min-width: 760px) { .three-up { grid-template-columns: repeat(3, 1fr); } }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+  }
+  .card h3 { color: var(--text); margin-bottom: 10px; font-size: 16px; }
+  .card p { font-size: 14px; margin-bottom: 12px; }
+  .card code { font-size: 12px; background: var(--bg); padding: 4px 8px; border-radius: 4px; display: inline-block; color: var(--text); }
+
+  table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; }
+  th, td { border-bottom: 1px solid var(--border); padding: 12px 10px; text-align: left; vertical-align: top; }
+  th { color: var(--text-dim); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { color: var(--text-dim); }
+  td strong { color: var(--text); font-weight: 600; }
+  td.us { color: var(--accent); font-weight: 500; }
+
+  blockquote {
+    border-left: 3px solid var(--accent-dim);
+    padding: 8px 0 8px 18px;
+    margin: 20px 0;
+    font-size: 15px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  blockquote cite { font-style: normal; color: var(--text-dimmer); font-size: 13px; }
+
+  ul { margin: 12px 0 20px 22px; color: var(--text-dim); }
+  ul li { margin-bottom: 6px; }
+
+  .footer {
+    padding: 40px 0 60px;
+    font-size: 13px;
+    color: var(--text-dimmer);
+    text-align: center;
+  }
+  .footer a { color: var(--text-dim); }
+
+  @media (max-width: 640px) {
+    h1 { font-size: 38px; }
+    h2 { font-size: 24px; }
+    .hero { padding: 48px 0 40px; }
+    section { padding: 48px 0; }
+    .nav-links a:not(.gh) { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#" class="brand">tag<span class="brand-tag">ops</span></a>
+    <div class="nav-links">
+      <a href="#demo">Demo</a>
+      <a href="#compare">Compare</a>
+      <a href="#mcp">MCP</a>
+      <a class="gh" href="https://github.com/ToroSachi/tagops">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="container">
+    <div class="eyebrow">v0.1 · MIT licensed · Open source</div>
+    <h1>Infrastructure-as-code for Google&nbsp;Tag&nbsp;Manager.</h1>
+    <p class="lead">
+      One command installs a complete vendor pixel. One command audits your container for the
+      <strong>Consent Mode v2 misconfigs that silently cost accounts up to 90% of their EEA conversions</strong>.
+      One command snapshots everything for Git.
+    </p>
+    <div class="ctas">
+      <a href="https://github.com/ToroSachi/tagops" class="cta cta-primary">Star on GitHub</a>
+      <a href="#demo" class="cta cta-secondary">See the 30-second demo</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <div class="eyebrow">Why this exists</div>
+    <h2>On July 21, 2025, Google quietly started breaking accounts.</h2>
+    <p class="lead">
+      That's when Consent Mode v2 enforcement went live for EEA and UK traffic. No banner. No email. No grace period.
+      Accounts that hadn't wired <code>ad_user_data</code> and <code>ad_personalization</code> through
+      their GTM layer saw observed Google Ads conversions drop up to 90% overnight.
+    </p>
+    <blockquote>
+      "Our client's consent banner was collecting user preferences but not transmitting signals to Google's tag
+      infrastructure. After diagnosis and remediation, approximately 40% of attribution data was recovered through
+      behavioral modeling; the remainder was permanently lost."
+      <br><cite>— field report in <a href="https://ppc.land/consent-mode-v2-enforcement-is-silently-breaking-google-ads-conversions/">ppc.land</a>, Matomo observed 90–95% EEA drops at affected sites</cite>
+    </blockquote>
+    <p>
+      None of this is visible in the GTM UI. There is no "Consent Mode v2 Compliance" tab. There's only the
+      silent revenue drop.
+    </p>
+    <p style="color: var(--text);">
+      TagOps is the CLI that finds these misconfigurations, fixes them, and keeps them from coming back.
+      Plus everything else you wish GTM had.
+    </p>
+  </div>
+</section>
+
+<section id="demo">
+  <div class="container">
+    <div class="eyebrow">The 30-second demo</div>
+    <h2>One command. A full container audited.</h2>
+    <p>Given a Google service account with <em>Edit</em> on your container:</p>
+    <div class="terminal">
+      <div class="terminal-head">
+        <span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span>
+        <span class="title">tagops-demo — zsh</span>
+      </div>
+      <div class="terminal-body"><span class="prompt">$</span> <span class="cmd">npm install -g tagops</span>
+<span class="prompt">$</span> <span class="cmd">export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json</span>
+<span class="prompt">$</span> <span class="cmd">tagops init <span class="flag">--import</span> \</span>
+<span class="cmd">    <span class="flag">--account-id</span> 123 <span class="flag">--container-id</span> 456 <span class="flag">--workspace-id</span> 1 \</span>
+<span class="cmd">    <span class="flag">--monthly-conversions</span> 1000 <span class="flag">--avg-value</span> 85</span>
+
+  <span class="ok">✔</span> Container imported
+
+  <span class="dim">Config:</span>      .gtmrc.json
+  <span class="dim">Snapshot:</span>    gtm-snapshot.json
+  <span class="dim">Report:</span>      consent-report-2026-04-16.md
+
+  <strong>What's inside</strong>
+    71 tags · 32 triggers · 69 variables · 0 folders
+
+  <strong>Consent Mode v2 compliance</strong>
+    <span class="warn">76%</span> (71 tags audited)
+    <span class="err">✖</span> 0 non-compliant · <span class="warn">⚠</span> 11 unconfigured
+
+  <strong>EU data-loss exposure estimate</strong>
+    Inputs: 1000 conversions/mo · 30% EEA share · $85 avg value
+    Non-compliant tag share: 18%
+    Affected conversions/mo:   ~54
+    Gross monthly exposure:    ~$4,598
+    <span class="loss">Permanent loss/mo (est.):  ~$2,759</span>
+    <span class="loss">Yearly permanent loss:     ~$33,108</span></div>
+    </div>
+    <p style="margin-top: 20px;">
+      In under a minute: a tracked <code>.gtmrc.json</code>, a full Git-ready snapshot, a shareable Markdown
+      compliance report, and a CFO-grade dollar exposure estimate. Output above is a real run against a
+      live 71-tag container.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <div class="eyebrow">What it does</div>
+    <h2>Three capabilities. Tightly scoped.</h2>
+    <div class="three-up">
+      <div class="card">
+        <h3>Vendor pixel templates</h3>
+        <p>
+          Not empty tag shells. Each template installs tags + triggers + consent + data-layer variables for
+          Meta, GA4, Google Ads, TikTok, LinkedIn, Pinterest, Snapchat, Reddit, X, Bing UET, Taboola, Klaviyo,
+          Impact, Shopify, +10 more.
+        </p>
+        <code>tagops templates install meta-pixel</code>
+      </div>
+      <div class="card">
+        <h3>Consent Mode v2 audit</h3>
+        <p>
+          Names which tags are missing which signals. <code>--fix</code> writes the corrections back via the
+          GTM API with an auto-snapshot first. <code>--score-only</code> is your CI gate.
+        </p>
+        <code>tagops consent-audit --report</code>
+      </div>
+      <div class="card">
+        <h3>IaC for your container</h3>
+        <p>
+          Snapshot, diff, plan, restore, promote between environments. Promotion enforces
+          <code>dev → staging → production</code>. Stage-skipping rejected.
+        </p>
+        <code>tagops snapshot && tagops diff</code>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="container">
+    <div class="eyebrow">Compared to what's out there</div>
+    <h2>The moat is the governance layer.</h2>
+    <p>Other GTM CLIs and MCPs are CRUD wrappers. TagOps is an opinionated control plane on top of them.</p>
+    <table>
+      <thead>
+        <tr><th>Tool</th><th>Type</th><th>Misses</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><a href="https://github.com/owntag/gtm-cli">owntag/gtm-cli</a></td>
+          <td>CLI</td>
+          <td>Templates, consent audit, IaC, policies</td>
+        </tr>
+        <tr>
+          <td><a href="https://stape.io/blog/mcp-server-for-google-tag-manager">Stape GTM MCP</a></td>
+          <td>MCP</td>
+          <td>Templates, consent audit, IaC, policies, CLI</td>
+        </tr>
+        <tr>
+          <td><a href="https://developers.google.com/analytics/devguides/MCP">Google GA4 MCP</a></td>
+          <td>MCP</td>
+          <td>Read-only; doesn't touch GTM</td>
+        </tr>
+        <tr>
+          <td>Google Community Template Gallery</td>
+          <td>UI</td>
+          <td>Triggers, consent, data layer mapping</td>
+        </tr>
+        <tr>
+          <td>GTM 360 (paid)</td>
+          <td>UI</td>
+          <td>Only for Google Marketing Platform customers</td>
+        </tr>
+        <tr>
+          <td class="us"><strong>TagOps</strong></td>
+          <td class="us"><strong>CLI + MCP</strong></td>
+          <td class="us"><strong>Templates + consent audit + IaC + policy gate</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="mcp">
+  <div class="container">
+    <div class="eyebrow">MCP integration</div>
+    <h2>The MCP with guardrails.</h2>
+    <p class="lead">
+      Other GTM MCP servers let an agent create, update, and delete tags via the API. TagOps's MCP server
+      routes every mutation through a safety layer:
+    </p>
+    <ul>
+      <li>Pre-fix snapshot before any mutation — reversible via <code>tagops restore</code></li>
+      <li>Policy gates block non-compliant writes (<code>gdpr-strict</code>, <code>ccpa-baseline</code>, <code>agency-standard</code>)</li>
+      <li>Production promotion enforces <code>dev → staging → production</code></li>
+      <li>Read-only by default. Flip the flag when you're ready.</li>
+    </ul>
+    <p>Claude Desktop config:</p>
+    <div class="terminal">
+      <div class="terminal-head">
+        <span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span>
+        <span class="title">claude_desktop_config.json</span>
+      </div>
+      <div class="terminal-body">{
+  "mcpServers": {
+    "tagops": {
+      "command": "tagops-mcp",
+      "args": ["--read-only"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/sa.json"
+      }
+    }
+  }
+}</div>
+    </div>
+    <p>Giving an AI agent production write access to a GTM container is how you break tracking for a
+    million-dollar campaign at 2am. Every other GTM MCP is one prompt away from that outcome. TagOps says
+    <em>no</em> before the agent does something it shouldn't.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <div class="eyebrow">Status</div>
+    <h2>Early — v0.1.</h2>
+    <ul>
+      <li>24 vendor templates · 324 tests · MCP server · MIT licensed</li>
+      <li>Browser OAuth login requires your own client (bring-your-own-client model). Service-account auth is
+        the supported path and works out of the box.</li>
+      <li>Two templates (GA4 event tags, Google Ads Enhanced Conversions) are preview-only pending native
+        tag-creation support; both are v0.2 priorities.</li>
+      <li><strong>Aggressive PR-merge during launch: reasonable vendor-template PRs merged within 48 hours.</strong></li>
+    </ul>
+    <div class="ctas">
+      <a href="https://github.com/ToroSachi/tagops" class="cta cta-primary">Star on GitHub</a>
+      <a href="https://github.com/ToroSachi/tagops#readme" class="cta cta-secondary">Read the docs</a>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="container">
+    <p>
+      <a href="https://github.com/ToroSachi/tagops">GitHub</a> ·
+      <a href="https://www.npmjs.com/package/tagops">npm</a> ·
+      <a href="https://github.com/ToroSachi/tagops/blob/master/CONTRIBUTING.md">Contributing</a> ·
+      <a href="https://github.com/ToroSachi/tagops/blob/master/SECURITY.md">Security</a>
+    </p>
+    <p style="margin-top: 12px;">MIT · Made for analytics engineers who've had a bad Monday.</p>
+  </div>
+</footer>
+
+</body>
+</html>

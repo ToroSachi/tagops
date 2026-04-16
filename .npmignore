@@ -1,0 +1,9 @@
+# Only ship compiled output and docs
+src/
+backups/
+.github/
+.gitignore
+.DS_Store
+tsconfig.json
+vitest.config.ts
+*.tsbuildinfo

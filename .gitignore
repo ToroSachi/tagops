@@ -1,0 +1,30 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+coverage/
+
+# User-specific config (contains real account IDs)
+.gtmrc.json
+.tagops-credentials.json
+
+# Service account and OAuth keys — never commit
+*-service-account.json
+service-account*.json
+*.pem
+*.p12
+.env
+.env.*
+
+# Generated output
+gtm-snapshot.json
+gtm-dictionary.md
+gtm-graph.md
+CHANGELOG-generated.md
+*.log
+
+# Local backups
+backups/
+
+# Ephemeral test artifacts
+test-cycle.json

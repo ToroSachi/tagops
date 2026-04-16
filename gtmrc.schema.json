@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gtm-auto Configuration",
+  "description": "Configuration file for gtm-auto CLI (Google Tag Manager automation toolkit)",
+  "type": "object",
+  "required": ["accountId", "containerId"],
+  "properties": {
+    "accountId": {
+      "type": "string",
+      "description": "Your GTM Account ID (found in the GTM URL)",
+      "pattern": "^[0-9]+$"
+    },
+    "containerId": {
+      "type": "string",
+      "description": "Your GTM Container ID (found in the GTM URL)",
+      "pattern": "^[0-9]+$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "description": "Your GTM Workspace ID (default: 1)",
+      "default": "1",
+      "pattern": "^[0-9]+$"
+    },
+    "ga4MeasurementId": {
+      "type": "string",
+      "description": "Your GA4 Measurement ID (e.g., G-XXXXXXXXXX)",
+      "pattern": "^G-[A-Z0-9]+$"
+    },
+    "profiles": {
+      "type": "array",
+      "description": "Named profiles for managing multiple containers (e.g., staging, production)",
+      "items": {
+        "type": "object",
+        "required": ["name", "accountId", "containerId"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Profile name (e.g., 'staging', 'production')"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "containerId": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "workspaceId": {
+            "type": "string",
+            "default": "1",
+            "pattern": "^[0-9]+$"
+          },
+          "ga4MeasurementId": {
+            "type": "string",
+            "pattern": "^G-[A-Z0-9]+$"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make TagOps better? We'd love to hear it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: "What problem does this solve? What's your current workaround?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: "Describe the feature you'd like."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Auditing & Compliance
+        - Templates & Deploy
+        - Multi-Container Sync
+        - IaC (snapshot/diff/restore)
+        - MCP Server
+        - CLI UX
+        - CI/CD
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

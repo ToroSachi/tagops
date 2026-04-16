@@ -1,0 +1,84 @@
+{
+  "name": "tagops",
+  "version": "0.1.0",
+  "description": "Infrastructure-as-code for Google Tag Manager: install vendor pixels with one command, audit Consent Mode v2, snapshot and diff your container.",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "bin": {
+    "tagops": "./dist/cli.js",
+    "tagops-mcp": "./dist/server.js"
+  },
+  "files": [
+    "dist",
+    "gtmrc.schema.json",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "google-tag-manager",
+    "gtm",
+    "consent-mode-v2",
+    "tag-management",
+    "infrastructure-as-code",
+    "mcp",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ToroSachi/tagops.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ToroSachi/tagops/issues"
+  },
+  "homepage": "https://github.com/ToroSachi/tagops#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "server": "tsx src/server.ts",
+    "clean": "node ./scripts/clean-dist.mjs",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node ./scripts/prune-dist.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint 'src/**/*.ts'",
+    "format": "prettier --write .",
+    "prepare": "husky",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@googleapis/tagmanager": "^14.1.0",
+    "@inquirer/prompts": "^8.3.2",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "google-auth-library": "^10.6.2",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.30.0",
+    "@types/node": "^22.13.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml}": [
+      "prettier --write"
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+# Example TagOps compliance gate — copy to .github/workflows/tagops-gate.yml
+#
+# Runs on every PR. Fails the check if:
+#   - Consent Mode v2 compliance score drops below the threshold
+#   - A policy-pack rule is violated
+#   - Tags have drifted from their template definitions
+#
+# Requires one repo secret:
+#   GTM_SERVICE_ACCOUNT_JSON — the full JSON of a GCP service-account key
+#                              with GTM "Edit" permission on your container.
+#
+# See: https://github.com/ToroSachi/tagops#governance
+
+name: TagOps compliance gate
+
+on:
+  pull_request:
+    paths:
+      - "gtm-snapshot.json"
+      - ".tagops-policies.json"
+      - ".gtmrc.json"
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install TagOps
+        run: npm install -g tagops
+
+      - name: Write GTM credentials
+        env:
+          SA_JSON: ${{ secrets.GTM_SERVICE_ACCOUNT_JSON }}
+        run: |
+          printf '%s' "$SA_JSON" > "${RUNNER_TEMP}/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=${RUNNER_TEMP}/sa.json" >> "$GITHUB_ENV"
+
+      - name: Consent Mode v2 score (fail below 90%)
+        run: tagops consent-audit --score-only --json >> $GITHUB_STEP_SUMMARY
+
+      - name: Policy pack enforcement
+        run: tagops policy-check --config .tagops-policies.json
+
+      - name: Template drift detection
+        run: tagops templates validate --all --json >> $GITHUB_STEP_SUMMARY
