@@ -8,6 +8,7 @@
 import { ga4Ecommerce } from "./ga4-ecommerce.js";
 import { googleAds } from "./google-ads.js";
 import { metaPixel } from "./meta-pixel.js";
+import { metaPixelAdvanced } from "./meta-pixel-advanced.js";
 import { linkedinInsight } from "./linkedin.js";
 import { xPixel } from "./x-pixel.js";
 import { bingUet } from "./bing-uet.js";
@@ -29,12 +30,20 @@ import { impactCom } from "./impact.js";
 import { retentionCom } from "./retention.js";
 import { magellanAi } from "./magellan.js";
 import { crmOfflineConversions } from "./crm-offline.js";
+import { microsoftClarity } from "./microsoft-clarity.js";
+import { hotjar } from "./hotjar.js";
+import { mixpanel } from "./mixpanel.js";
+import { posthog } from "./posthog.js";
+import { hubspot } from "./hubspot.js";
+import { intercom } from "./intercom.js";
+import { yandexMetrica } from "./yandex-metrica.js";
 import type { IntegrationTemplate } from "./types.js";
 
 // Re-export individual vendors for direct imports
 export { ga4Ecommerce } from "./ga4-ecommerce.js";
 export { googleAds } from "./google-ads.js";
 export { metaPixel } from "./meta-pixel.js";
+export { metaPixelAdvanced } from "./meta-pixel-advanced.js";
 export { linkedinInsight } from "./linkedin.js";
 export { xPixel } from "./x-pixel.js";
 export { bingUet } from "./bing-uet.js";
@@ -56,6 +65,13 @@ export { impactCom } from "./impact.js";
 export { retentionCom } from "./retention.js";
 export { magellanAi } from "./magellan.js";
 export { crmOfflineConversions } from "./crm-offline.js";
+export { microsoftClarity } from "./microsoft-clarity.js";
+export { hotjar } from "./hotjar.js";
+export { mixpanel } from "./mixpanel.js";
+export { posthog } from "./posthog.js";
+export { hubspot } from "./hubspot.js";
+export { intercom } from "./intercom.js";
+export { yandexMetrica } from "./yandex-metrica.js";
 
 // Re-export all shared types so consumers can import from one spot
 export type {
@@ -79,13 +95,14 @@ export {
 /**
  * All vendor templates in one array.
  *
- * Order matches the original registry.ts inline array:
+ * Order:
  * analytics → advertising → social → marketing → platform → affiliate → attribution → retargeting
  */
 export const extractedVendorTemplates: IntegrationTemplate[] = [
   ga4Ecommerce,
   googleAds,
   metaPixel,
+  metaPixelAdvanced,
   crmOfflineConversions,
   linkedinInsight,
   xPixel,
@@ -107,4 +124,11 @@ export const extractedVendorTemplates: IntegrationTemplate[] = [
   impactCom,
   retentionCom,
   magellanAi,
+  microsoftClarity,
+  hotjar,
+  mixpanel,
+  posthog,
+  hubspot,
+  intercom,
+  yandexMetrica,
 ];

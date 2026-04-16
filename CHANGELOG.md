@@ -10,7 +10,15 @@ First public release.
 
 ### Added
 - **`tagops init --import`** — one-command onboarding. Pulls the live container, writes `.gtmrc.json`, snapshots every tag/trigger/variable/folder, runs a Consent Mode v2 audit, and emits a shareable Markdown report. Verified end-to-end on a real 71-tag container.
-- 24 vendor templates (Meta Pixel, GA4, Google Ads, TikTok, LinkedIn, Pinterest, Snapchat, Reddit, X, Bing UET, Taboola, Klaviyo, Impact.com, Shopify Custom Pixel, +10 more)
+- **32 vendor templates** (24 original + 8 new v0.1 additions based on 2026 adoption research):
+  - Microsoft Clarity — free heatmaps + recordings
+  - Hotjar — mid-market heatmaps + session recording
+  - Mixpanel — product analytics
+  - PostHog — open-source product analytics
+  - HubSpot — onsite CRM tracking
+  - Intercom — chat widget
+  - Yandex Metrica — RU/CIS analytics with Webvisor
+  - Meta Pixel Advanced — 15 standard events + Advanced Matching + Consent Mode v2 + CAPI dedup
 - `templates` subcommand: list, preview, install, validate, export, import, bundle create, bundle install
 - `consent-audit` with `--report`, `--fix`, `--score-only`
 - IaC flow: `snapshot`, `diff`, `plan`, `restore`, `publish`

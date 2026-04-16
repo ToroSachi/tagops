@@ -101,17 +101,17 @@ Promotion enforces `dev → staging → production`. Stage-skipping is rejected.
 
 ---
 
-## 24 vendor templates
+## 32 vendor templates
 
-| Category                | Vendors                                                                                                     |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Advertising             | Meta Pixel, Google Ads, TikTok, LinkedIn Insight, Pinterest, Snapchat, Reddit, X/Twitter, Bing UET, Taboola |
-| Analytics               | GA4 Ecommerce                                                                                               |
-| Email / CRM             | Klaviyo, Retention.com, AddShoppers                                                                         |
-| Affiliate / Attribution | Impact.com, Amazon Attribution, CRM Offline Conversions                                                     |
-| Publisher / Platform    | Shopify Custom Pixel, Magellan AI, AspireIQ, Artsai/iHeart, Ascendia, Checkmate, Vibe                       |
+| Category                | Vendors                                                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Analytics               | GA4 Ecommerce, Microsoft Clarity, Hotjar, Mixpanel, PostHog, Yandex Metrica                                                      |
+| Advertising             | Meta Pixel, Meta Pixel Advanced, Google Ads, TikTok, LinkedIn Insight, Pinterest, Snapchat, Reddit, X/Twitter, Bing UET, Taboola |
+| Marketing / CRM         | Klaviyo, HubSpot, Intercom, Retention.com, AddShoppers                                                                           |
+| Affiliate / Attribution | Impact.com, Amazon Attribution, CRM Offline Conversions                                                                          |
+| Publisher / Platform    | Shopify Custom Pixel, Magellan AI, AspireIQ, Artsai/iHeart, Ascendia, Checkmate, Vibe                                            |
 
-Run `tagops templates list` for the current set. Templates export as portable JSON so agencies can bundle a client-specific integration stack:
+Run `tagops templates list` for the current set. The `meta-pixel-advanced` template ships 15 standard events with Advanced Matching, Consent Mode v2 wiring, and CAPI dedup — use it when Event Match Quality is a priority. Templates export as portable JSON so agencies can bundle a client-specific integration stack:
 
 ```bash
 tagops templates bundle create --name standard-ecom \
@@ -127,7 +127,7 @@ tagops templates bundle install standard-ecom.bundle.json
 
 **Early.** v0.1 — being prepared for first public release. See [ROADMAP.md](ROADMAP.md).
 
-- 24 vendor templates · 318 tests · MCP server · MIT license
+- 32 vendor templates · 332 tests · MCP server · MIT license
 - Browser OAuth login requires `TAGOPS_CLIENT_ID` / `TAGOPS_CLIENT_SECRET` (bring your own OAuth client) — service-account auth works out of the box
 - Two templates (GA4 event tags, Google Ads Enhanced Conversions) are preview-only pending native tag-creation support; both are priority for v0.2
 - Aggressive PR-merge policy during launch: reasonable vendor-template PRs merged within 48 hours

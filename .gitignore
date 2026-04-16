@@ -21,6 +21,7 @@ gtm-snapshot.json
 gtm-dictionary.md
 gtm-graph.md
 CHANGELOG-generated.md
+consent-report-*.md
 *.log
 
 # Local backups
