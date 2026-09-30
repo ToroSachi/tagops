@@ -2,7 +2,7 @@
  * Tests for Multi-Container Compare and Webhook tools
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 describe("Webhook Notifications", () => {
@@ -24,6 +24,26 @@ describe("Webhook Notifications", () => {
   it("printNotifyResult handles failure", async () => {
     const { printNotifyResult } = await import("../tools/watch.js");
     expect(() => printNotifyResult({ sent: false, error: "Connection refused" })).not.toThrow();
+  });
+
+  it("sendWebhook strips the webhook URL from failure results (TOR-2133)", async () => {
+    const { sendWebhook } = await import("../tools/watch.js");
+    const url = "https://hooks.slack.com/services/T123/B456/secret-token-xyz";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error(`fetch failed for ${url}`)));
+    try {
+      const result = await sendWebhook(url, {
+        event: "custom",
+        timestamp: new Date().toISOString(),
+        summary: "test",
+      });
+      expect(result.sent).toBe(false);
+      expect(result.error).toBeDefined();
+      expect(result.error).not.toContain(url);
+      expect(result.error).not.toContain("secret-token-xyz");
+      expect(result.error).toContain("[REDACTED]");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
