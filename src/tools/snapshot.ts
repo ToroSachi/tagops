@@ -11,7 +11,7 @@
  */
 
 import { writeFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import {
@@ -74,6 +74,20 @@ function listIfSupported<T>(supported: boolean, loader: () => Promise<T[]>): Pro
   return supported ? loader() : Promise.resolve([]);
 }
 
+/**
+ * Refuse paths that are not a single relative/absolute file path.
+ * Newlines / NULs would let a caller smuggle extra shell lines into
+ * string-built git commands; keep the path a single path argument.
+ */
+export function assertSafeSnapshotOutputPath(outputPath: string): void {
+  if (typeof outputPath !== "string" || outputPath.length === 0) {
+    throw new Error("Snapshot output path must be a non-empty file path.");
+  }
+  if (/[\r\n\0]/.test(outputPath)) {
+    throw new Error("Snapshot output path must be a single file path without newlines.");
+  }
+}
+
 export async function createSnapshot(meta: SnapshotMetadataOptions = {}): Promise<GtmSnapshot> {
   const config = loadConfig();
   const container = await getContainer();
@@ -125,8 +139,11 @@ export async function takeSnapshot(
   meta: SnapshotMetadataOptions = {},
   gitCommit?: boolean,
 ): Promise<SnapshotResult> {
+  const rawOutput = outputPath ?? "gtm-snapshot.json";
+  assertSafeSnapshotOutputPath(rawOutput);
   const snapshot = await createSnapshot(meta);
-  const filePath = resolve(outputPath ?? "gtm-snapshot.json");
+  const filePath = resolve(rawOutput);
+  assertSafeSnapshotOutputPath(filePath);
   const serialized = JSON.stringify(snapshot, null, 2) + "\n";
   const sizeBytes = Buffer.byteLength(serialized, "utf8");
   const warning =
@@ -138,10 +155,13 @@ export async function takeSnapshot(
   let gitCommitSha: string | undefined;
   if (gitCommit) {
     try {
-      execSync(`git add "${filePath}"`, { stdio: "pipe" });
+      // Argument vector — never a shell string. Paths with metacharacters stay one argv.
+      execFileSync("git", ["add", "--", filePath], { stdio: "pipe" });
       const ts = snapshot.meta.timestamp.replace(/[:.]/g, "-").slice(0, 19);
-      execSync(`git commit -m "tagops: snapshot ${ts}"`, { stdio: "pipe" });
-      gitCommitSha = execSync("git rev-parse HEAD", { stdio: "pipe" }).toString().trim();
+      execFileSync("git", ["commit", "-m", `tagops: snapshot ${ts}`], { stdio: "pipe" });
+      gitCommitSha = execFileSync("git", ["rev-parse", "HEAD"], { stdio: "pipe" })
+        .toString()
+        .trim();
     } catch (err) {
       // If git isn't available or repo isn't initialized, skip silently
       console.warn("  ⚠ Git commit skipped: " + (err as Error).message);

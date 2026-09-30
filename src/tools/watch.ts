@@ -9,6 +9,8 @@
  *   tagops notify --webhook <url> --event publish --message "v1.5 deployed"
  */
 
+import { lookup as dnsLookupDefault } from "node:dns/promises";
+import { isIP } from "node:net";
 import chalk from "chalk";
 import {
   captureWorkspaceSnapshot,
@@ -42,11 +44,146 @@ export interface NotifyResult {
   error?: string;
 }
 
+/** Injectable DNS lookup for tests (hostname → first A/AAAA address). */
+export type WebhookDnsLookup = (hostname: string) => Promise<string>;
+
+const BLOCKED_HOSTNAMES = new Set(["localhost", "metadata.google.internal"]);
+
+function normalizeHostname(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+function ipv4Octets(ip: string): number[] | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return octets;
+}
+
+/**
+ * True for loopback, link-local, private, CGNAT, and unspecified addresses.
+ * Covers IPv4-mapped IPv6 (::ffff:x.x.x.x).
+ */
+export function isBlockedWebhookAddress(ip: string): boolean {
+  const normalized = normalizeHostname(ip);
+  if (normalized.includes(":")) {
+    const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+    if (mapped) {
+      return isBlockedWebhookAddress(mapped[1]);
+    }
+    if (normalized === "::" || normalized === "::1") return true;
+    // Unique-local fc00::/7 and link-local fe80::/10
+    if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true;
+    if (/^fe[89ab]/i.test(normalized)) return true;
+    return false;
+  }
+
+  const octets = ipv4Octets(normalized);
+  if (!octets) return false;
+  const [a, b] = octets;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true; // link-local / cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  return false;
+}
+
+/**
+ * Synchronous URL shape checks: scheme, no userinfo, refuse private IP literals
+ * and well-known internal hostnames. Does not resolve DNS.
+ */
+export function validateWebhookUrl(urlString: string): URL {
+  let url: URL;
+  try {
+    url = new URL(urlString);
+  } catch {
+    throw new Error("Webhook URL is not a valid URL.");
+  }
+
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Webhook URL must use http or https.");
+  }
+
+  if (url.username || url.password) {
+    throw new Error("Webhook URL must not include credentials.");
+  }
+
+  const hostname = normalizeHostname(url.hostname);
+  if (!hostname) {
+    throw new Error("Webhook URL hostname is required.");
+  }
+
+  if (BLOCKED_HOSTNAMES.has(hostname) || hostname.endsWith(".localhost")) {
+    throw new Error(`Webhook URL host is blocked: ${hostname}`);
+  }
+
+  if (isIP(hostname) && isBlockedWebhookAddress(hostname)) {
+    throw new Error(`Webhook URL resolves to a blocked address: ${hostname}`);
+  }
+
+  return url;
+}
+
+async function defaultWebhookDnsLookup(hostname: string): Promise<string> {
+  const result = await dnsLookupDefault(hostname, { all: false });
+  return typeof result === "string" ? result : result.address;
+}
+
+/**
+ * Resolve the webhook hostname and refuse private / link-local answers.
+ * Residual DNS TOCTOU remains between this check and fetch(); pinning the
+ * resolved address would require a custom HTTP client, which we deliberately
+ * do not introduce here.
+ */
+export async function validateWebhookUrlResolved(
+  urlString: string,
+  lookup: WebhookDnsLookup = defaultWebhookDnsLookup,
+): Promise<URL> {
+  const url = validateWebhookUrl(urlString);
+  const hostname = normalizeHostname(url.hostname);
+
+  if (isIP(hostname)) {
+    return url;
+  }
+
+  let address: string;
+  try {
+    address = await lookup(hostname);
+  } catch (err) {
+    throw new Error(`Webhook URL DNS lookup failed: ${(err as Error).message}`);
+  }
+
+  if (!address || isBlockedWebhookAddress(address)) {
+    throw new Error(
+      `Webhook URL host resolves to a blocked address (${address || "empty"}): ${hostname}`,
+    );
+  }
+
+  return url;
+}
+
+function stripWebhookUrlFromMessage(message: string, url: string): string {
+  if (!url) return message;
+  return message.split(url).join("[webhook-url]");
+}
+
 /**
  * Send a notification payload to a webhook URL.
  * Supports Slack and Microsoft Teams webhook formats.
  */
-export async function sendWebhook(url: string, payload: WebhookPayload): Promise<NotifyResult> {
+export async function sendWebhook(
+  url: string,
+  payload: WebhookPayload,
+  options?: { lookup?: WebhookDnsLookup },
+): Promise<NotifyResult> {
+  try {
+    await validateWebhookUrlResolved(url, options?.lookup);
+  } catch (err) {
+    return { sent: false, error: (err as Error).message };
+  }
+
   // Detect webhook type and format accordingly
   const body = isSlackWebhook(url)
     ? formatSlackPayload(payload)
@@ -67,7 +204,10 @@ export async function sendWebhook(url: string, payload: WebhookPayload): Promise
 
     return { sent: true, statusCode: response.status };
   } catch (err) {
-    return { sent: false, error: (err as Error).message };
+    return {
+      sent: false,
+      error: stripWebhookUrlFromMessage((err as Error).message, url),
+    };
   }
 }
 

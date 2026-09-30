@@ -146,3 +146,156 @@ describe("Concurrency Parsing", () => {
     expect(resolveConcurrencyLimit()).toBe(7);
   });
 });
+
+describe("Snapshot git commit command injection", () => {
+  // Exact shell-injection shape from TOR-2131 — must never reach a shell.
+  const maliciousOutput = 'ok.json"; touch /tmp/pwned; echo "';
+
+  afterEach(() => {
+    vi.doUnmock("../lib/config.js");
+    vi.doUnmock("../lib/gtm-cli.js");
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("node:fs");
+    vi.resetModules();
+    vi.restoreAllMocks();
+  });
+
+  it("passes metacharacter output paths as argv to execFileSync, never via a shell", async () => {
+    const expectedResolved = resolve(maliciousOutput);
+
+    const execFileSync = vi.fn((cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") return Buffer.from("deadbeef\n");
+      return Buffer.from("");
+    });
+    const execSync = vi.fn(() => {
+      throw new Error("execSync must not be used for snapshot git commit");
+    });
+    const writeFileSync = vi.fn();
+
+    vi.doMock("node:child_process", () => ({ execFileSync, execSync }));
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs")>();
+      return { ...actual, writeFileSync };
+    });
+    vi.doMock("../lib/config.js", () => ({
+      loadConfig: () => ({
+        accountId: "acct-1",
+        containerId: "cont-1",
+        workspaceId: "ws-1",
+      }),
+    }));
+    vi.doMock("../lib/gtm-cli.js", () => ({
+      getContainer: vi.fn().mockResolvedValue({}),
+      listTags: vi.fn().mockResolvedValue([]),
+      listTriggers: vi.fn().mockResolvedValue([]),
+      listVariables: vi.fn().mockResolvedValue([]),
+      listFolders: vi.fn().mockResolvedValue([]),
+      listBuiltInVariables: vi.fn().mockResolvedValue([]),
+      listEnvironments: vi.fn().mockResolvedValue([]),
+      listClients: vi.fn().mockResolvedValue([]),
+      listTransformations: vi.fn().mockResolvedValue([]),
+    }));
+
+    const snapshotModule = await import("../tools/snapshot.js");
+    const result = await snapshotModule.takeSnapshot(maliciousOutput, {}, true);
+
+    expect(writeFileSync).toHaveBeenCalledWith(expectedResolved, expect.any(String));
+    expect(execSync).not.toHaveBeenCalled();
+    expect(execFileSync).toHaveBeenCalledWith(
+      "git",
+      ["add", "--", expectedResolved],
+      expect.objectContaining({ stdio: "pipe" }),
+    );
+    // Never a shell string like `git add "…"`.
+    expect(
+      execFileSync.mock.calls.some(
+        (call) => typeof call[0] === "string" && String(call[0]).includes("git add"),
+      ),
+    ).toBe(false);
+    const addCall = execFileSync.mock.calls.find(
+      (call) => Array.isArray(call[1]) && call[1][0] === "add",
+    );
+    expect(addCall?.[1]).toEqual(["add", "--", expectedResolved]);
+    expect(addCall?.[1]?.[2]).toContain('"; touch');
+    expect(result.gitCommitSha).toBe("deadbeef");
+  });
+
+  it("refuses snapshot output paths that contain newlines", async () => {
+    const { assertSafeSnapshotOutputPath } = await import("../tools/snapshot.js");
+    expect(() => assertSafeSnapshotOutputPath("ok.json\nrm -rf /")).toThrow("without newlines");
+  });
+});
+
+describe("Webhook SSRF DNS gating", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("blocks private IP literals and hostnames that resolve to private/link-local addresses", async () => {
+    const {
+      validateWebhookUrl,
+      validateWebhookUrlResolved,
+      isBlockedWebhookAddress,
+      sendWebhook,
+    } = await import("../tools/watch.js");
+
+    expect(isBlockedWebhookAddress("127.0.0.1")).toBe(true);
+    expect(isBlockedWebhookAddress("169.254.169.254")).toBe(true);
+    expect(isBlockedWebhookAddress("10.0.0.5")).toBe(true);
+    expect(isBlockedWebhookAddress("8.8.8.8")).toBe(false);
+
+    expect(() => validateWebhookUrl("http://127.0.0.1/hook")).toThrow("blocked address");
+    expect(() => validateWebhookUrl("http://169.254.169.254/latest/meta-data")).toThrow(
+      "blocked address",
+    );
+
+    await expect(
+      validateWebhookUrlResolved("https://metadata.google.internal/hook", async () => "169.254.169.254"),
+    ).rejects.toThrow(/blocked/i);
+
+    // Host is not a literal private IP, but DNS says it is — must refuse before fetch.
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await sendWebhook(
+      "https://evil.example/hook",
+      {
+        event: "custom",
+        timestamp: new Date().toISOString(),
+        summary: "ssrf probe",
+      },
+      { lookup: async () => "169.254.169.254" },
+    );
+
+    expect(result.sent).toBe(false);
+    expect(result.error).toMatch(/blocked address/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("strips the webhook URL from fetch failure messages", async () => {
+    const { sendWebhook } = await import("../tools/watch.js");
+    const webhookUrl = "https://hooks.example.com/services/ABC/DEF";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error(`fetch failed for ${webhookUrl}: ECONNREFUSED`);
+      }),
+    );
+
+    const result = await sendWebhook(
+      webhookUrl,
+      {
+        event: "custom",
+        timestamp: new Date().toISOString(),
+        summary: "notify",
+      },
+      { lookup: async () => "93.184.216.34" },
+    );
+
+    expect(result.sent).toBe(false);
+    expect(result.error).toContain("[webhook-url]");
+    expect(result.error).not.toContain(webhookUrl);
+  });
+});
