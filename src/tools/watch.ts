@@ -10,6 +10,7 @@
  */
 
 import chalk from "chalk";
+import { getSafeErrorMessage } from "../lib/redaction.js";
 import {
   captureWorkspaceSnapshot,
   compareSnapshots,
@@ -67,8 +68,19 @@ export async function sendWebhook(url: string, payload: WebhookPayload): Promise
 
     return { sent: true, statusCode: response.status };
   } catch (err) {
-    return { sent: false, error: (err as Error).message };
+    return { sent: false, error: sanitizeWebhookError(err, url) };
   }
+}
+
+/**
+ * Build a failure message safe to surface: fetch errors embed the request
+ * URL, and Slack/Teams secrets live in the webhook URL path, so strip the
+ * exact URL before applying the shared sensitive-text redaction.
+ */
+function sanitizeWebhookError(err: unknown, url: string): string {
+  const safe = getSafeErrorMessage(err);
+  if (url.length === 0) return safe;
+  return safe.split(url).join("[REDACTED]");
 }
 
 function isSlackWebhook(url: string): boolean {
