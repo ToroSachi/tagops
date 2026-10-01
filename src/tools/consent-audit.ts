@@ -43,6 +43,7 @@ import {
   getTagSearchText,
 } from "../lib/policies.js";
 import { createPreFixBackup } from "../lib/pre-fix-backup.js";
+import { getSafeErrorMessage } from "../lib/redaction.js";
 import { requireWriteAccess } from "../lib/permission-guard.js";
 import type {
   ConsentSignalStatus,
@@ -416,7 +417,7 @@ export async function fixConsentV2(
         actions.push(`Fixed tag ${tag.tagId} (${tag.name}): added ${requiredSignals.join(", ")}`);
         fixed++;
       } catch (err) {
-        actions.push(`Error fixing tag ${tag.tagId} (${tag.name}): ${(err as Error).message}`);
+        actions.push(`Error fixing tag ${tag.tagId} (${tag.name}): ${getSafeErrorMessage(err)}`);
         errors++;
       }
     }
