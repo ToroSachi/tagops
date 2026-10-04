@@ -7,14 +7,18 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isLightweightPixel, isAdVendor, isAnalyticsVendor } from "../lib/architecture.js";
 import { findUnlimitedFiringTags } from "../tools/fix-firing.js";
 import type { GtmTag, GtmTrigger } from "../types/gtm.js";
 
 const BACKUP_DIR = resolve(import.meta.dirname, "../../backups/20260314_133738");
-const backupTags = JSON.parse(readFileSync(resolve(BACKUP_DIR, "tags.json"), "utf-8")) as GtmTag[];
+const BACKUP_TAGS_PATH = resolve(BACKUP_DIR, "tags.json");
+const hasLiveBackup = existsSync(BACKUP_TAGS_PATH);
+const backupTags = (
+  hasLiveBackup ? JSON.parse(readFileSync(BACKUP_TAGS_PATH, "utf-8")) : []
+) as GtmTag[];
 
 function makeMinimalTag(
   overrides: Partial<GtmTag> & { tagId: string; name: string; type: string },
@@ -152,7 +156,7 @@ describe("Fix-Firing Tag Classification", () => {
   });
 });
 
-describe("Consent Classification Consistency", () => {
+describe.skipIf(!hasLiveBackup)("Consent Classification Consistency", () => {
   it("classifyTag agrees with centralized vendor detection for live ArtsAI tags", async () => {
     const { classifyTag } = await import("../tools/consent-audit.js");
     const artsaiTags = backupTags.filter((tag) => tag.name.toLowerCase().includes("artsai"));
