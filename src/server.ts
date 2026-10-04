@@ -1124,7 +1124,9 @@ server.tool(
   },
   async ({ webhook_url, event, summary, score }) => {
     try {
-      const { notifyEvent } = await import("./tools/watch.js");
+      const { notifyEvent, validateWebhookUrlResolved } = await import("./tools/watch.js");
+      // Fail closed before notifyEvent so MCP clients get ERROR, not a soft {sent:false}.
+      await validateWebhookUrlResolved(webhook_url);
       const result = await notifyEvent(
         webhook_url,
         event,
