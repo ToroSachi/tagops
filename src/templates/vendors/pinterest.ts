@@ -5,7 +5,7 @@ import type { IntegrationTemplate } from "./types.js";
 
 export const pinterestTag: IntegrationTemplate = {
   id: "pinterest-tag",
-  version: "1.0.0",
+  version: "1.1.0",
   name: "Pinterest Tag",
   description: "Pinterest conversion tracking: PageVisit, ViewCategory, AddToCart, Checkout",
   vendor: "Pinterest",
@@ -32,8 +32,9 @@ export const pinterestTag: IntegrationTemplate = {
         name: "Pinterest – ViewCategory",
         type: "html",
         html: `<script>pintrk('track','viewcategory');</script>`,
-        triggerEvent: "view_item",
+        triggerEvent: "view_item_list",
         consentType: "ad_storage",
+        note: "Fires only on category/listing views (view_item_list). Pinterest has no standard product-view event; PDP views are already covered by the base tag pagevisit, so binding viewcategory to view_item would pollute ViewCategory audiences with product traffic (TOR-2560).",
       },
       {
         name: "Pinterest – AddToCart",
