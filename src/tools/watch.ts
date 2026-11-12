@@ -78,9 +78,9 @@ export async function sendWebhook(url: string, payload: WebhookPayload): Promise
  * exact URL before applying the shared sensitive-text redaction.
  */
 function sanitizeWebhookError(err: unknown, url: string): string {
-  const safe = getSafeErrorMessage(err);
-  if (url.length === 0) return safe;
-  return safe.split(url).join("[REDACTED]");
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const withoutUrl = url ? message.replaceAll(url, "[REDACTED]") : message;
+  return getSafeErrorMessage(withoutUrl);
 }
 
 function isSlackWebhook(url: string): boolean {

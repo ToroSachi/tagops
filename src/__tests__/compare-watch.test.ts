@@ -26,25 +26,34 @@ describe("Webhook Notifications", () => {
     expect(() => printNotifyResult({ sent: false, error: "Connection refused" })).not.toThrow();
   });
 
-  it("sendWebhook strips the webhook URL from failure results (TOR-2133)", async () => {
-    const { sendWebhook } = await import("../tools/watch.js");
-    const url = "https://hooks.slack.com/services/T123/B456/secret-token-xyz";
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error(`fetch failed for ${url}`)));
-    try {
-      const result = await sendWebhook(url, {
-        event: "custom",
-        timestamp: new Date().toISOString(),
-        summary: "test",
-      });
-      expect(result.sent).toBe(false);
-      expect(result.error).toBeDefined();
-      expect(result.error).not.toContain(url);
-      expect(result.error).not.toContain("secret-token-xyz");
-      expect(result.error).toContain("[REDACTED]");
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
+  it.each([
+    { scenario: "plain", suffix: "" },
+    { scenario: "query field", suffix: "?access_token=synthetic-query-marker" },
+    { scenario: "long path", suffix: `/${"x".repeat(700)}` },
+  ])(
+    "sendWebhook strips the full webhook URL from failure results (TOR-2133): $scenario",
+    async ({ suffix }) => {
+      const { sendWebhook } = await import("../tools/watch.js");
+      const url = `https://example.invalid/hooks/hook-path-sentinel${suffix}`;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(new Error(`fetch failed for ${url}; Bearer synthetic-bearer`)),
+      );
+      try {
+        const result = await sendWebhook(url, {
+          event: "custom",
+          timestamp: new Date().toISOString(),
+          summary: "test",
+        });
+        expect(result).toEqual({
+          sent: false,
+          error: "fetch failed for [REDACTED]; Bearer [REDACTED]",
+        });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });
 
 describe("Container Compare", () => {
