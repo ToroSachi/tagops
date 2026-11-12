@@ -1032,10 +1032,13 @@ export async function createTag(
   if (!input.name)
     throw new TagOpsError({ code: ErrorCode.VALIDATION_FAILED, message: "Tag name is required" });
 
+  // Validate trigger IDs before loading config so invalid input fails fast
+  // with a typed error even when no profile is configured.
+  const firingTriggerId = normalizeFiringTriggerIds(input.firingTriggerId);
+
   try {
     const parent = getWorkspacePath(profileName);
     const gtm = await getGtmClient(profileName);
-    const firingTriggerId = normalizeFiringTriggerIds(input.firingTriggerId);
     const existingNotes = input.config.notes ? String(input.config.notes) : "";
     // Only inject UUID if one isn't already present (prevents duplicates on re-sync)
     const hasUUID = Boolean(getTagOpsId(existingNotes));

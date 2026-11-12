@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   listTemplates,
@@ -19,9 +19,13 @@ import {
 } from "../templates/registry.js";
 import { TRIGGER_MAP } from "../lib/architecture.js";
 
-// ── Load the live backup for cross-reference ──
+// ── Load the live backup for cross-reference (absent on fresh checkouts, e.g. CI) ──
 const BACKUP_DIR = resolve(import.meta.dirname, "../../backups/20260314_133738");
-const backupTags = JSON.parse(readFileSync(resolve(BACKUP_DIR, "tags.json"), "utf-8")) as Array<{
+const BACKUP_TAGS_PATH = resolve(BACKUP_DIR, "tags.json");
+const hasLiveBackup = existsSync(BACKUP_TAGS_PATH);
+const backupTags = (
+  hasLiveBackup ? JSON.parse(readFileSync(BACKUP_TAGS_PATH, "utf-8")) : []
+) as Array<{
   tagId: string;
   name: string;
   type: string;
@@ -332,7 +336,7 @@ describe("Pixel ID Substitution", () => {
 // 4. CROSS-REFERENCE AGAINST LIVE BACKUP
 // ═══════════════════════════════════════════════════════════
 
-describe("Cross-Reference: Templates vs Live GTM Backup", () => {
+describe.skipIf(!hasLiveBackup)("Cross-Reference: Templates vs Live GTM Backup", () => {
   // ── Meta Pixel ──
   describe("Meta Pixel", () => {
     const liveMetaTags = getActiveTags().filter(
@@ -688,7 +692,7 @@ describe("Cross-Reference: Templates vs Live GTM Backup", () => {
 // 5. CONSENT SETTINGS VERIFICATION
 // ═══════════════════════════════════════════════════════════
 
-describe("Consent Settings", () => {
+describe.skipIf(!hasLiveBackup)("Consent Settings", () => {
   it("all advertising tags in live container use ad_storage", () => {
     const adTags = getActiveTags().filter(
       (t) =>
@@ -754,7 +758,7 @@ describe("Trigger Mapping Coverage", () => {
 // 7. ACTIVE TAG COUNT SUMMARY
 // ═══════════════════════════════════════════════════════════
 
-describe("Live Container Summary", () => {
+describe.skipIf(!hasLiveBackup)("Live Container Summary", () => {
   const active = getActiveTags();
   const paused = backupTags.filter((t) => t.paused);
 
@@ -802,20 +806,23 @@ describe("Template Drift Detection", () => {
     expect(result.results.length).toBe(0);
   });
 
-  it("validateAllTemplates surfaces a template when its tags are present", () => {
-    // Use real installed tag names from the live backup
-    const installed = backupTags.map((t) => ({
-      name: t.name,
-      type: t.type,
-      consentType: t.consentSettings?.consentType?.list?.[0]?.value,
-      triggerEvent: undefined,
-    }));
-    const result = validateAllTemplates(installed);
-    expect(result.relevantTemplates).toBeGreaterThan(0);
-    // Each surfaced result must reference a known template id
-    const knownIds = new Set(listTemplates().map((t) => t.id));
-    for (const r of result.results) {
-      expect(knownIds.has(r.templateId)).toBe(true);
-    }
-  });
+  it.skipIf(!hasLiveBackup)(
+    "validateAllTemplates surfaces a template when its tags are present",
+    () => {
+      // Use real installed tag names from the live backup
+      const installed = backupTags.map((t) => ({
+        name: t.name,
+        type: t.type,
+        consentType: t.consentSettings?.consentType?.list?.[0]?.value,
+        triggerEvent: undefined,
+      }));
+      const result = validateAllTemplates(installed);
+      expect(result.relevantTemplates).toBeGreaterThan(0);
+      // Each surfaced result must reference a known template id
+      const knownIds = new Set(listTemplates().map((t) => t.id));
+      for (const r of result.results) {
+        expect(knownIds.has(r.templateId)).toBe(true);
+      }
+    },
+  );
 });

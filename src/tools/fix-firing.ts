@@ -24,6 +24,7 @@ import {
   INITIALIZATION_TRIGGER_ID,
 } from "../lib/architecture.js";
 import { tagUsesSpaTrigger } from "../lib/policies.js";
+import { getSafeErrorMessage } from "../lib/redaction.js";
 import { createPreFixBackup } from "../lib/pre-fix-backup.js";
 import { requireWriteAccess } from "../lib/permission-guard.js";
 import type { GtmTag, GtmTrigger } from "../types/gtm.js";
@@ -175,7 +176,7 @@ export async function fixFiring(option?: FiringOption, dryRun = false): Promise<
       actions.push(`Fixed "${item.name}" (ID: ${item.tagId}): unlimited → ${targetOption}`);
       fixed++;
     } catch (err) {
-      actions.push(`Error fixing "${item.name}" (ID: ${item.tagId}): ${(err as Error).message}`);
+      actions.push(`Error fixing "${item.name}" (ID: ${item.tagId}): ${getSafeErrorMessage(err)}`);
       errors++;
     }
   }
