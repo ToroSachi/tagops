@@ -2,7 +2,7 @@
  * Tests for Multi-Container Compare and Webhook tools
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { GtmTrigger, GtmVariable } from "../types/gtm.js";
 
 describe("Webhook Notifications", () => {
@@ -25,6 +25,35 @@ describe("Webhook Notifications", () => {
     const { printNotifyResult } = await import("../tools/watch.js");
     expect(() => printNotifyResult({ sent: false, error: "Connection refused" })).not.toThrow();
   });
+
+  it.each([
+    { scenario: "plain", suffix: "" },
+    { scenario: "query field", suffix: "?access_token=synthetic-query-marker" },
+    { scenario: "long path", suffix: `/${"x".repeat(700)}` },
+  ])(
+    "sendWebhook strips the full webhook URL from failure results (TOR-2133): $scenario",
+    async ({ suffix }) => {
+      const { sendWebhook } = await import("../tools/watch.js");
+      const url = `https://example.invalid/hooks/hook-path-sentinel${suffix}`;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(new Error(`fetch failed for ${url}; Bearer synthetic-bearer`)),
+      );
+      try {
+        const result = await sendWebhook(url, {
+          event: "custom",
+          timestamp: new Date().toISOString(),
+          summary: "test",
+        });
+        expect(result).toEqual({
+          sent: false,
+          error: "fetch failed for [REDACTED]; Bearer [REDACTED]",
+        });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });
 
 describe("Container Compare", () => {
