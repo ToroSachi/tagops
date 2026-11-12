@@ -11,7 +11,7 @@
  */
 
 import { writeFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import {
@@ -125,8 +125,12 @@ export async function takeSnapshot(
   meta: SnapshotMetadataOptions = {},
   gitCommit?: boolean,
 ): Promise<SnapshotResult> {
+  const output = outputPath ?? "gtm-snapshot.json";
+  const filePath = resolve(output);
+  if (!output || /[\r\n\0]/.test(filePath)) {
+    throw new Error("Snapshot output must be a non-empty file path without line breaks.");
+  }
   const snapshot = await createSnapshot(meta);
-  const filePath = resolve(outputPath ?? "gtm-snapshot.json");
   const serialized = JSON.stringify(snapshot, null, 2) + "\n";
   const sizeBytes = Buffer.byteLength(serialized, "utf8");
   const warning =
@@ -138,10 +142,16 @@ export async function takeSnapshot(
   let gitCommitSha: string | undefined;
   if (gitCommit) {
     try {
-      execSync(`git add "${filePath}"`, { stdio: "pipe" });
+      execFileSync("git", ["--literal-pathspecs", "add", "--", filePath], { stdio: "pipe" });
       const ts = snapshot.meta.timestamp.replace(/[:.]/g, "-").slice(0, 19);
-      execSync(`git commit -m "tagops: snapshot ${ts}"`, { stdio: "pipe" });
-      gitCommitSha = execSync("git rev-parse HEAD", { stdio: "pipe" }).toString().trim();
+      execFileSync(
+        "git",
+        ["--literal-pathspecs", "commit", "--only", "-m", `tagops: snapshot ${ts}`, "--", filePath],
+        { stdio: "pipe" },
+      );
+      gitCommitSha = execFileSync("git", ["rev-parse", "HEAD"], { stdio: "pipe" })
+        .toString()
+        .trim();
     } catch (err) {
       // If git isn't available or repo isn't initialized, skip silently
       console.warn("  ⚠ Git commit skipped: " + (err as Error).message);
