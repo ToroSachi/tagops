@@ -188,9 +188,12 @@ export function loadConfig(profileName?: string): GtmConfig {
     return config;
   }
 
-  // No config file found — tell the user how to create one
-  throw new Error(
+  // No config file found — tell the user how to create one. A ConfigError
+  // (not a plain Error) so callers can branch on the type instead of
+  // string-matching the message (TOR-2135). Message kept byte-identical.
+  throw new ConfigError(
     "No .gtmrc.json found. Run: tagops init --account-id <ID> --container-id <ID> --workspace-id <ID>",
+    getConfigErrorPath(),
   );
 }
 

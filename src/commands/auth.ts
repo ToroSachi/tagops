@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "node:fs";
+import { ConfigError } from "../lib/config.js";
 
 export function registerAuthCommands(program: Command) {
   const authCmd = program.command("auth").description("Authentication management");
@@ -122,7 +123,7 @@ export function registerAuthCommands(program: Command) {
           gtmCli.isPermissionLookupError(err)
         ) {
           note = "GTM user permissions could not be inspected with the current credentials.";
-        } else if (err instanceof Error && err.message.includes(".gtmrc.json")) {
+        } else if (err instanceof ConfigError) {
           note =
             "Configure .gtmrc.json to inspect GTM container permissions for the current account.";
         } else {
