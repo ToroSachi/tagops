@@ -11,6 +11,7 @@
 
 import chalk from "chalk";
 import { getSafeErrorMessage } from "../lib/redaction.js";
+import { postWebhook } from "../lib/webhook-transport.js";
 import {
   captureWorkspaceSnapshot,
   compareSnapshots,
@@ -56,24 +57,18 @@ export async function sendWebhook(url: string, payload: WebhookPayload): Promise
       : formatGenericPayload(payload);
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      return { sent: false, statusCode: response.status, error: `HTTP ${response.status}` };
+    const status = await postWebhook(url, JSON.stringify(body));
+    if (status < 200 || status >= 300) {
+      return { sent: false, statusCode: status, error: `HTTP ${status}` };
     }
-
-    return { sent: true, statusCode: response.status };
+    return { sent: true, statusCode: status };
   } catch (err) {
     return { sent: false, error: sanitizeWebhookError(err, url) };
   }
 }
 
 /**
- * Build a failure message safe to surface: fetch errors embed the request
+ * Build a failure message safe to surface: request errors can contain the
  * URL, and Slack/Teams secrets live in the webhook URL path, so strip the
  * exact URL before applying the shared sensitive-text redaction.
  */

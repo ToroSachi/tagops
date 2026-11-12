@@ -5,6 +5,10 @@
 import { describe, it, expect, vi } from "vitest";
 import type { GtmTrigger, GtmVariable } from "../types/gtm.js";
 
+import { postWebhook } from "../lib/webhook-transport.js";
+
+vi.mock("../lib/webhook-transport.js", () => ({ postWebhook: vi.fn() }));
+
 describe("Webhook Notifications", () => {
   it("formats Slack payloads correctly", async () => {
     const mod = await import("../tools/watch.js");
@@ -26,6 +30,22 @@ describe("Webhook Notifications", () => {
     expect(() => printNotifyResult({ sent: false, error: "Connection refused" })).not.toThrow();
   });
 
+  it("reports a redirect response as a failed notification", async () => {
+    const { sendWebhook } = await import("../tools/watch.js");
+    vi.mocked(postWebhook).mockResolvedValue(307);
+    try {
+      await expect(
+        sendWebhook("https://example.invalid/hooks/fixture", {
+          event: "custom",
+          timestamp: new Date().toISOString(),
+          summary: "test",
+        }),
+      ).resolves.toEqual({ sent: false, statusCode: 307, error: "HTTP 307" });
+    } finally {
+      vi.mocked(postWebhook).mockReset();
+    }
+  });
+
   it.each([
     { scenario: "plain", suffix: "" },
     { scenario: "query field", suffix: "?access_token=synthetic-query-marker" },
@@ -35,9 +55,8 @@ describe("Webhook Notifications", () => {
     async ({ suffix }) => {
       const { sendWebhook } = await import("../tools/watch.js");
       const url = `https://example.invalid/hooks/hook-path-sentinel${suffix}`;
-      vi.stubGlobal(
-        "fetch",
-        vi.fn().mockRejectedValue(new Error(`fetch failed for ${url}; Bearer synthetic-bearer`)),
+      vi.mocked(postWebhook).mockRejectedValue(
+        new Error(`fetch failed for ${url}; Bearer synthetic-bearer`),
       );
       try {
         const result = await sendWebhook(url, {
@@ -50,7 +69,7 @@ describe("Webhook Notifications", () => {
           error: "fetch failed for [REDACTED]; Bearer [REDACTED]",
         });
       } finally {
-        vi.unstubAllGlobals();
+        vi.mocked(postWebhook).mockReset();
       }
     },
   );
